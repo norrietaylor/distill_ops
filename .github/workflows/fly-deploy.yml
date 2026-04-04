@@ -29,9 +29,10 @@ jobs:
 
       - name: Deploy to Fly.io
         run: |
+          IMAGE_TAG="${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}"
           flyctl deploy \
             -c fly/fly.toml \
             --dockerfile fly/Dockerfile \
-            --image "ghcr.io/norrietaylor/distillery:${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}"
+            --build-arg "IMAGE_TAG=${IMAGE_TAG}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

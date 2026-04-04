@@ -4,7 +4,8 @@
 # The generic image is built and published by the distillery repo's
 # supply-chain.yml workflow to ghcr.io/norrietaylor/distillery.
 
-FROM ghcr.io/norrietaylor/distillery:latest
+ARG IMAGE_TAG=latest
+FROM ghcr.io/norrietaylor/distillery:${IMAGE_TAG}
 
 USER root
 
