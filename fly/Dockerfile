@@ -14,7 +14,7 @@ USER root
 ENV FASTMCP_HOME=/data/fastmcp
 
 # Copy Fly-specific config
-COPY distillery-fly.yaml /app/distillery-fly.yaml
+COPY fly/distillery-fly.yaml /app/distillery-fly.yaml
 ENV DISTILLERY_CONFIG=/app/distillery-fly.yaml
 
 RUN chown -R appuser:appuser /app
