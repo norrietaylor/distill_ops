@@ -1,6 +1,8 @@
 name: Deploy to Fly.io
 
 on:
+  repository_dispatch:
+    types: [container-published]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -30,6 +32,6 @@ jobs:
           flyctl deploy \
             -c fly/fly.toml \
             --dockerfile fly/Dockerfile \
-            --image "ghcr.io/norrietaylor/distillery:${{ github.event.inputs.image_tag || 'latest' }}"
+            --image "ghcr.io/norrietaylor/distillery:${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
