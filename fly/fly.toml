@@ -16,6 +16,7 @@ app = "distillery-mcp"
 
 [env]
   DISTILLERY_CONFIG = "/app/distillery-fly.yaml"
+  FASTMCP_HOME = "/data/.fastmcp"
 
 [http_service]
   internal_port = 8000
