@@ -1,0 +1,95 @@
+name: Distillery Scheduler (staging)
+
+# On-demand scheduler for the singleton staging app distillery-mcp-dev.
+#
+# Unlike scheduler.yml this has NO `schedule:` trigger — staging is
+# only exercised when a developer explicitly runs the workflow. It
+# hits the STAGING_DISTILLERY_URL with the STAGING_WEBHOOK_SECRET so
+# prod cooldowns and audit records are not touched.
+#
+# timeout-minutes is 15 here (not 5) — intentional divergence from
+# scheduler.yml until norrietaylor/distillery#221 lands.
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Operation to run against staging"
+        required: true
+        default: "poll"
+        type: choice
+        options:
+          - poll
+          - rescore
+          - maintenance
+          - all
+
+jobs:
+  poll:
+    name: Poll Feed Sources (staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.inputs.operation == 'poll' || github.event.inputs.operation == 'all'
+    steps:
+      - name: Trigger staging poll webhook
+        env:
+          DISTILLERY_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
+          DISTILLERY_URL: ${{ vars.STAGING_DISTILLERY_URL }}
+        run: |
+          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
+            "${DISTILLERY_URL}/api/poll")
+          cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
+          if [ "$http_code" = "429" ]; then
+            echo "::warning::Endpoint in cooldown (429) — skipping"
+            exit 0
+          elif [ "$http_code" -ge 400 ]; then
+            echo "::error::Webhook returned HTTP ${http_code}"
+            exit 1
+          fi
+
+  rescore:
+    name: Rescore Feed Entries (staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.inputs.operation == 'rescore' || github.event.inputs.operation == 'all'
+    steps:
+      - name: Trigger staging rescore webhook
+        env:
+          DISTILLERY_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
+          DISTILLERY_URL: ${{ vars.STAGING_DISTILLERY_URL }}
+        run: |
+          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
+            "${DISTILLERY_URL}/api/rescore")
+          cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
+          if [ "$http_code" = "429" ]; then
+            echo "::warning::Endpoint in cooldown (429) — skipping"
+            exit 0
+          elif [ "$http_code" -ge 400 ]; then
+            echo "::error::Webhook returned HTTP ${http_code}"
+            exit 1
+          fi
+
+  maintenance:
+    name: Weekly KB Maintenance (staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.inputs.operation == 'maintenance' || github.event.inputs.operation == 'all'
+    steps:
+      - name: Trigger staging maintenance webhook
+        env:
+          DISTILLERY_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
+          DISTILLERY_URL: ${{ vars.STAGING_DISTILLERY_URL }}
+        run: |
+          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
+            "${DISTILLERY_URL}/api/maintenance")
+          cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
+          if [ "$http_code" = "429" ]; then
+            echo "::warning::Endpoint in cooldown (429) — skipping"
+            exit 0
+          elif [ "$http_code" -ge 400 ]; then
+            echo "::error::Webhook returned HTTP ${http_code}"
+            exit 1
+          fi

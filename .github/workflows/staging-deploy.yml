@@ -1,0 +1,163 @@
+name: Staging Deploy (Fly.io)
+
+# Deploy a Distillery branch build to the singleton staging app
+# distillery-mcp-dev. Triggered via repository_dispatch from the
+# distillery repo's staging-deploy.yml workflow (which handles the
+# /deploy-staging PR comment and the GHCR build).
+#
+# Database isolation: the prod Fly volume (distillery_data) is forked
+# into a fresh volume (distillery_staging_data) on every deploy. The
+# fork is a point-in-time atomic filesystem snapshot, so both the
+# distillery.db and .wal files land consistently. The forked volume is
+# destroyed on teardown (see staging-teardown.yml).
+
+on:
+  repository_dispatch:
+    types: [staging-deploy]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR image tag to deploy (e.g. pr-42-sha-abc1234)"
+        required: true
+      pr_number:
+        description: "Source distillery PR number (for comment-back)"
+        required: false
+        default: ""
+      head_sha:
+        description: "Source distillery head SHA (for display)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy staging
+    runs-on: ubuntu-latest
+    concurrency:
+      group: fly-staging
+      cancel-in-progress: true
+    env:
+      STAGING_APP: distillery-mcp-dev
+      PROD_APP: distillery-mcp
+      PROD_VOLUME_NAME: distillery_data
+      STAGING_VOLUME_NAME: distillery_staging_data
+      IMAGE_TAG: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag }}
+      PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+      HEAD_SHA: ${{ github.event.client_payload.head_sha || github.event.inputs.head_sha }}
+      SOURCE_REPO: ${{ github.event.client_payload.repo || 'norrietaylor/distillery' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # v1.5
+
+      - name: Ensure staging app exists
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if ! flyctl status -a "${STAGING_APP}" >/dev/null 2>&1; then
+            echo "Staging app ${STAGING_APP} does not exist — creating"
+            flyctl apps create "${STAGING_APP}" --org personal
+          else
+            echo "Staging app ${STAGING_APP} already exists"
+          fi
+
+      - name: Discard stale staging volume
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Destroy any pre-existing staging volume so the new fork
+          # reflects fresh prod state. Multiple volumes with the same
+          # name are possible after prior crashes — destroy all.
+          STALE_IDS=$(flyctl volumes list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(v['id'] for v in json.load(sys.stdin) if v['name']=='${STAGING_VOLUME_NAME}'))")
+          for vid in ${STALE_IDS}; do
+            echo "Destroying stale staging volume ${vid}"
+            flyctl volumes destroy "${vid}" -y || true
+          done
+
+      - name: Resolve prod volume id and region
+        id: prod_vol
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Pick the first volume on prod with the configured name.
+          INFO=$(flyctl volumes list -a "${PROD_APP}" --json \
+            | python3 -c "import json,sys; vs=[v for v in json.load(sys.stdin) if v['name']=='${PROD_VOLUME_NAME}']; assert vs, 'no prod volume'; print(vs[0]['id'], vs[0]['region'])")
+          VOL_ID=$(echo "${INFO}" | awk '{print $1}')
+          REGION=$(echo "${INFO}" | awk '{print $2}')
+          echo "vol_id=${VOL_ID}" >> "$GITHUB_OUTPUT"
+          echo "region=${REGION}" >> "$GITHUB_OUTPUT"
+          echo "Prod volume ${VOL_ID} in region ${REGION}"
+
+      - name: Fork prod volume into staging app
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # `flyctl volumes fork` creates a point-in-time copy. We
+          # target the staging app with --app so the fork is attached
+          # there rather than back onto prod.
+          flyctl volumes fork "${{ steps.prod_vol.outputs.vol_id }}" \
+            --name "${STAGING_VOLUME_NAME}" \
+            --app "${STAGING_APP}" \
+            --region "${{ steps.prod_vol.outputs.region }}"
+
+      - name: Set staging secrets
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # Reused from prod
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+          GITHUB_ORG_CHECK_TOKEN: ${{ secrets.GITHUB_ORG_CHECK_TOKEN }}
+          # Staging-specific
+          STAGING_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
+          STAGING_GITHUB_CLIENT_ID: ${{ secrets.STAGING_GITHUB_CLIENT_ID }}
+          STAGING_GITHUB_CLIENT_SECRET: ${{ secrets.STAGING_GITHUB_CLIENT_SECRET }}
+        run: |
+          flyctl secrets set --stage -a "${STAGING_APP}" \
+            "JINA_API_KEY=${JINA_API_KEY}" \
+            "GITHUB_CLIENT_ID=${STAGING_GITHUB_CLIENT_ID}" \
+            "GITHUB_CLIENT_SECRET=${STAGING_GITHUB_CLIENT_SECRET}" \
+            "DISTILLERY_BASE_URL=https://${STAGING_APP}.fly.dev" \
+            "DISTILLERY_WEBHOOK_SECRET=${STAGING_WEBHOOK_SECRET}" \
+            "GITHUB_ORG_CHECK_TOKEN=${GITHUB_ORG_CHECK_TOKEN}"
+
+      - name: Deploy staging image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy \
+            -c fly/fly-dev.toml \
+            --dockerfile fly/Dockerfile-dev \
+            --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+            -a "${STAGING_APP}"
+
+      - name: Comment on source PR
+        if: env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.DISTILLERY_PR_COMMENT_TOKEN }}
+        run: |
+          SCHED_URL="https://github.com/${{ github.repository }}/actions/workflows/scheduler-staging.yml"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY=$(cat <<EOF
+          ✅ Staging deployed from \`${HEAD_SHA:0:7}\`
+
+          - URL: https://${STAGING_APP}.fly.dev
+          - Image: \`${IMAGE_TAG}\`
+          - Deploy run: ${RUN_URL}
+          - Scheduler (on-demand): ${SCHED_URL}
+
+          Comment \`/teardown-staging\` or close the PR to tear down.
+          EOF
+          )
+          gh pr comment "${PR_NUMBER}" --repo "${SOURCE_REPO}" --body "${BODY}"
+
+      - name: Comment failure on source PR
+        if: failure() && env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.DISTILLERY_PR_COMMENT_TOKEN }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh pr comment "${PR_NUMBER}" --repo "${SOURCE_REPO}" \
+            --body "❌ Staging deploy failed — see ${RUN_URL}"

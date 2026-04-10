@@ -1,0 +1,97 @@
+name: Staging Cleanup (safety cron)
+
+# Safety net for the "forgot to /teardown-staging and forgot to close
+# the PR" case. Once a day, if the most recent release on
+# distillery-mcp-dev is older than 24h, run the same teardown steps as
+# staging-teardown.yml: stop machines and destroy the forked volume.
+
+on:
+  schedule:
+    - cron: "13 6 * * *"  # 06:13 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Stale staging cleanup
+    runs-on: ubuntu-latest
+    concurrency:
+      group: fly-staging
+      cancel-in-progress: false
+    env:
+      STAGING_APP: distillery-mcp-dev
+      STAGING_VOLUME_NAME: distillery_staging_data
+      MAX_AGE_HOURS: 24
+
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # v1.5
+
+      - name: Check staging app exists
+        id: check
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if flyctl status -a "${STAGING_APP}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine if staging is stale
+        id: stale
+        if: steps.check.outputs.exists == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Use `fly releases list` to find the most recent deploy time.
+          # If the latest release is older than MAX_AGE_HOURS, flag stale.
+          LATEST=$(flyctl releases list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "
+          import json, sys
+          from datetime import datetime, timezone, timedelta
+          try:
+              releases = json.load(sys.stdin)
+          except Exception:
+              print('none')
+              sys.exit(0)
+          if not releases:
+              print('none')
+              sys.exit(0)
+          # Releases are ordered newest-first
+          created = releases[0].get('CreatedAt') or releases[0].get('created_at')
+          if not created:
+              print('unknown')
+              sys.exit(0)
+          # Normalise Z → +00:00 for fromisoformat
+          dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+          age = datetime.now(timezone.utc) - dt
+          print('stale' if age > timedelta(hours=${MAX_AGE_HOURS}) else 'fresh')
+          ")
+          echo "state=${LATEST}" >> "$GITHUB_OUTPUT"
+          echo "Staging release state: ${LATEST}"
+
+      - name: Stop all staging machines
+        if: steps.check.outputs.exists == 'true' && (steps.stale.outputs.state == 'stale' || steps.stale.outputs.state == 'none')
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          MACHINE_IDS=$(flyctl machines list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))")
+          for mid in ${MACHINE_IDS}; do
+            echo "Stopping machine ${mid}"
+            flyctl machine stop "${mid}" -a "${STAGING_APP}" || true
+          done
+
+      - name: Destroy staging volume(s)
+        if: steps.check.outputs.exists == 'true' && (steps.stale.outputs.state == 'stale' || steps.stale.outputs.state == 'none')
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          VOL_IDS=$(flyctl volumes list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(v['id'] for v in json.load(sys.stdin) if v['name']=='${STAGING_VOLUME_NAME}'))")
+          for vid in ${VOL_IDS}; do
+            echo "Destroying stale staging volume ${vid}"
+            flyctl volumes destroy "${vid}" -y || true
+          done

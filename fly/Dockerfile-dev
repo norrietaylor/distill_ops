@@ -1,0 +1,29 @@
+# Fly.io deployment — staging variant.
+#
+# Extends the generic Distillery image with the staging config file.
+# The image tag is supplied by the staging-deploy workflow and resolves
+# to a branch build of the form pr-<N>-sha-<short> pushed by the
+# distillery repo's staging-deploy.yml workflow.
+
+ARG IMAGE_TAG=staging
+FROM ghcr.io/norrietaylor/distillery:${IMAGE_TAG}
+
+USER root
+
+# Persist FastMCP OAuth state on the Fly volume so tokens survive
+# machine autostop/restart cycles (same as prod).
+ENV FASTMCP_HOME=/data/fastmcp
+
+# Copy staging-specific config
+COPY fly/distillery-staging.yaml /app/distillery-staging.yaml
+ENV DISTILLERY_CONFIG=/app/distillery-staging.yaml
+
+RUN chown -R appuser:appuser /app
+
+EXPOSE 8000
+
+# Fix volume ownership at runtime, then drop to appuser.
+# The staging volume is forked fresh from prod on every deploy, so
+# RESET_DB is intentionally NOT wired up here — use the teardown
+# workflow to discard staging state instead.
+CMD ["sh", "-c", "chown -R appuser:appuser /data && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]
