@@ -32,8 +32,11 @@ RUN chown -R appuser:appuser /app
 
 EXPOSE 8000
 
-# Fix volume ownership at runtime, wipe inherited FastMCP OAuth state,
-# then drop to appuser. The staging volume is forked fresh from prod
-# on every deploy, so unconditional wipes are safe — there is no
-# legitimate staging OAuth state to preserve across deploys.
-CMD ["sh", "-c", "chown -R appuser:appuser /data && rm -rf /data/fastmcp && mkdir -p /data/fastmcp && chown -R appuser:appuser /data/fastmcp && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]
+# Fix volume ownership at runtime (only if not already owned — the
+# recursive chown gets expensive as the forked DB grows, and on all
+# boots after the first of a given deploy it's a no-op), wipe
+# inherited FastMCP OAuth state, then drop to appuser. The staging
+# volume is forked fresh from prod on every deploy, so unconditional
+# wipes of /data/fastmcp are safe — there is no legitimate staging
+# OAuth state to preserve across deploys.
+CMD ["sh", "-c", "if [ \"$(stat -c %U /data 2>/dev/null)\" != appuser ]; then chown -R appuser:appuser /data; fi && rm -rf /data/fastmcp && install -d -o appuser -g appuser /data/fastmcp && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]

@@ -37,8 +37,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
+      # All fly-staging operations (deploy, teardown, cleanup)
+      # serialize in the same group with cancel-in-progress: false so
+      # a newly dispatched deploy cannot interrupt an in-flight
+      # teardown or safety-cleanup mid-destroy. A second
+      # /deploy-staging queues instead of cancelling; the wait is
+      # bounded by the deploy timeout-minutes cap above.
       group: fly-staging
-      cancel-in-progress: true
+      cancel-in-progress: false
     env:
       STAGING_APP: distillery-mcp-dev
       PROD_APP: distillery-mcp
@@ -94,16 +100,26 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
+          set -euo pipefail
           # Destroy any pre-existing machines FIRST — `flyctl volumes
           # destroy` refuses while a volume is attached, and `machine
           # stop` returns before the stop completes. `machine destroy
           # -f` both halts the machine and detaches the volume in one
           # step, which is what we need before the volume destroy.
+          #
+          # Fail fast on any destroy error: orphaned machines or
+          # volumes will collide with the new snapshot-create below
+          # and silently undermine the "fresh fork per deploy"
+          # isolation guarantee, so it's safer to abort and surface
+          # the problem than to continue.
           MACHINE_IDS=$(flyctl machines list -a "${STAGING_APP}" --json 2>/dev/null \
             | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))")
           for mid in ${MACHINE_IDS}; do
             echo "Destroying stale staging machine ${mid}"
-            flyctl machine destroy -f "${mid}" -a "${STAGING_APP}" || true
+            if ! flyctl machine destroy -f "${mid}" -a "${STAGING_APP}"; then
+              echo "::error::Failed to destroy stale staging machine ${mid}"
+              exit 1
+            fi
           done
 
           # Now destroy any pre-existing staging volumes so the new
@@ -113,7 +129,10 @@ jobs:
             | python3 -c "import json,sys; print(' '.join(v['id'] for v in json.load(sys.stdin) if v['name']=='${STAGING_VOLUME_NAME}'))")
           for vid in ${STALE_IDS}; do
             echo "Destroying stale staging volume ${vid}"
-            flyctl volumes destroy "${vid}" -y || true
+            if ! flyctl volumes destroy "${vid}" -y; then
+              echo "::error::Failed to destroy stale staging volume ${vid}"
+              exit 1
+            fi
           done
 
       - name: Resolve prod volume id, region, and size

@@ -42,7 +42,14 @@ jobs:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
           DISTILLERY_URL: ${{ vars.STAGING_DISTILLERY_URL }}
         run: |
-          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+          # --connect-timeout bounds initial TCP+TLS; --max-time bounds
+          # the whole request including server-side work (poll can take
+          # a while on large feed sets, hence the generous cap but well
+          # under the 15-min job timeout). --retry-connrefused only
+          # retries TCP-level failures, not HTTP 4xx/5xx.
+          http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' -X POST \
+            --connect-timeout 10 --max-time 780 \
+            --retry 2 --retry-delay 5 --retry-connrefused \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
             "${DISTILLERY_URL}/api/poll")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
@@ -65,7 +72,9 @@ jobs:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
           DISTILLERY_URL: ${{ vars.STAGING_DISTILLERY_URL }}
         run: |
-          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+          http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' -X POST \
+            --connect-timeout 10 --max-time 780 \
+            --retry 2 --retry-delay 5 --retry-connrefused \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
             "${DISTILLERY_URL}/api/rescore")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
@@ -88,7 +97,9 @@ jobs:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
           DISTILLERY_URL: ${{ vars.STAGING_DISTILLERY_URL }}
         run: |
-          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+          http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' -X POST \
+            --connect-timeout 10 --max-time 780 \
+            --retry 2 --retry-delay 5 --retry-connrefused \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
             "${DISTILLERY_URL}/api/maintenance")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
