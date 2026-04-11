@@ -163,7 +163,19 @@ jobs:
       - name: Snapshot prod volume and create staging volume from snapshot
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          SNAPSHOT_REUSE_MAX_AGE_MINUTES: "30"
+          # "Prefer fresh" window — if the newest existing snapshot is
+          # within this many minutes, reuse it silently (fast path).
+          # Bumped to 60 because Fly's per-volume on-demand snapshot
+          # rate limit appears to be >30 minutes in practice (observed
+          # "failed_precondition: snapshot is already scheduled at ..."
+          # at 18-26 minutes after the previous create call).
+          SNAPSHOT_REUSE_MAX_AGE_MINUTES: "60"
+          # "Absolute max" fallback window — if creating a fresh
+          # snapshot fails (rate limit), accept a snapshot up to this
+          # old rather than failing the deploy. Fly takes daily auto
+          # snapshots, so there's always something under 24h. Staging
+          # still gets valid crash-consistent prod data.
+          SNAPSHOT_ABSOLUTE_MAX_AGE_HOURS: "24"
         run: |
           set -euo pipefail
           # We use snapshot → create rather than `volumes fork --app`
@@ -172,22 +184,22 @@ jobs:
           # the documented, stable way to clone a volume into a
           # different app.
           #
-          # Fly rate-limits on-demand snapshot creation per volume
-          # (failed_precondition: "snapshot is already scheduled at ..."
-          # when you try to create them too frequently — observed in
-          # practice at ~18-minute intervals). To handle that and to
-          # keep iterative PR testing fast, we look for an existing
-          # recent snapshot before creating a new one:
+          # Three-stage resolution to handle Fly's per-volume snapshot
+          # rate limit without ever failing the deploy when usable
+          # data is available:
           #
-          #   1. List snapshots on the prod volume.
-          #   2. Pick the newest.
-          #   3. If its age <= SNAPSHOT_REUSE_MAX_AGE_MINUTES, reuse it.
-          #   4. Otherwise, create a new snapshot and poll for it.
+          #   1. Newest existing snapshot age <= REUSE window → reuse.
+          #   2. Otherwise, try to create a fresh snapshot.
+          #        - Success → poll and use it.
+          #        - Rate-limited → fall through to stage 3.
+          #   3. Newest existing snapshot age <= ABSOLUTE MAX → reuse
+          #      with a ::warning:: annotation. Only truly stale
+          #      (>24h) or missing snapshots fail the deploy.
           #
-          # Fly snapshots are crash-consistent at the filesystem layer,
-          # which is what DuckDB needs for WAL recovery on first open
-          # of the staging DB — reuse is safe as long as the staging
-          # DB doesn't need the absolute latest state.
+          # Fly snapshots are crash-consistent at the filesystem
+          # layer, which is what DuckDB needs for WAL recovery on
+          # first open of the staging DB — reuse is always safe for
+          # KB content; the only question is how fresh.
 
           resolve_newest_snapshot() {
             flyctl volumes snapshots list "${{ steps.prod_vol.outputs.vol_id }}" -a "${PROD_APP}" --json 2>/dev/null \
@@ -220,51 +232,69 @@ jobs:
           "
           }
 
+          REUSE_WINDOW_S=$(( SNAPSHOT_REUSE_MAX_AGE_MINUTES * 60 ))
+          ABSOLUTE_MAX_S=$(( SNAPSHOT_ABSOLUTE_MAX_AGE_HOURS * 3600 ))
+
           INFO=$(resolve_newest_snapshot || true)
-          SNAP_ID=""
-          SNAP_AGE=""
+          EXISTING_ID=""
+          EXISTING_AGE=""
           if [ -n "${INFO}" ]; then
-            SNAP_ID=$(echo "${INFO}" | awk '{print $1}')
-            SNAP_AGE=$(echo "${INFO}" | awk '{print $2}')
-            echo "Newest existing snapshot: ${SNAP_ID} (age ${SNAP_AGE}s)"
+            EXISTING_ID=$(echo "${INFO}" | awk '{print $1}')
+            EXISTING_AGE=$(echo "${INFO}" | awk '{print $2}')
+            echo "Newest existing snapshot: ${EXISTING_ID} (age ${EXISTING_AGE}s)"
           else
-            echo "No existing snapshots on prod volume"
+            echo "No existing snapshots found on prod volume"
           fi
 
-          MAX_AGE_S=$(( SNAPSHOT_REUSE_MAX_AGE_MINUTES * 60 ))
-          if [ -n "${SNAP_ID}" ] && [ -n "${SNAP_AGE}" ] && [ "${SNAP_AGE}" -ge 0 ] && [ "${SNAP_AGE}" -le "${MAX_AGE_S}" ]; then
-            echo "Reusing existing snapshot ${SNAP_ID} (age ${SNAP_AGE}s <= ${MAX_AGE_S}s)"
+          SNAP_ID=""
+
+          # Stage 1: fast-path reuse
+          if [ -n "${EXISTING_ID}" ] && [ -n "${EXISTING_AGE}" ] \
+             && [ "${EXISTING_AGE}" -ge 0 ] \
+             && [ "${EXISTING_AGE}" -le "${REUSE_WINDOW_S}" ]; then
+            SNAP_ID="${EXISTING_ID}"
+            echo "Stage 1: reusing existing snapshot ${SNAP_ID} (age ${EXISTING_AGE}s <= ${REUSE_WINDOW_S}s reuse window)"
           else
-            echo "Creating a fresh snapshot of prod volume ${{ steps.prod_vol.outputs.vol_id }}"
-            # Accept failed_precondition from the snapshot rate-limiter
-            # and fall through to polling — there may already be an
-            # in-flight snapshot that's not yet visible in the list.
-            if ! flyctl volumes snapshots create "${{ steps.prod_vol.outputs.vol_id }}" -a "${PROD_APP}"; then
-              echo "::warning::snapshots create returned non-zero (likely rate-limited); polling for an in-flight or recently-created snapshot instead"
+            # Stage 2: try to create a fresh snapshot
+            echo "Stage 2: attempting to create a fresh snapshot of prod volume ${{ steps.prod_vol.outputs.vol_id }}"
+            CREATE_RC=0
+            flyctl volumes snapshots create "${{ steps.prod_vol.outputs.vol_id }}" -a "${PROD_APP}" || CREATE_RC=$?
+
+            if [ "${CREATE_RC}" -eq 0 ]; then
+              # Poll for the newly-created snapshot to appear in the list.
+              for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                INFO=$(resolve_newest_snapshot || true)
+                if [ -n "${INFO}" ]; then
+                  CANDIDATE_ID=$(echo "${INFO}" | awk '{print $1}')
+                  CANDIDATE_AGE=$(echo "${INFO}" | awk '{print $2}')
+                  if [ -n "${CANDIDATE_ID}" ] && [ "${CANDIDATE_AGE}" -ge 0 ] && [ "${CANDIDATE_AGE}" -le 300 ]; then
+                    SNAP_ID="${CANDIDATE_ID}"
+                    echo "Stage 2: resolved fresh snapshot ${SNAP_ID} (age ${CANDIDATE_AGE}s) on attempt ${attempt}"
+                    break
+                  fi
+                fi
+                echo "Stage 2: fresh snapshot not yet visible (attempt ${attempt})"
+                sleep 5
+              done
+              if [ -z "${SNAP_ID}" ]; then
+                echo "::warning::Stage 2: create succeeded but polling failed — falling through to stage 3"
+              fi
+            else
+              echo "::warning::Stage 2: snapshots create returned ${CREATE_RC} (likely Fly per-volume rate limit) — falling through to stage 3"
             fi
 
-            SNAP_ID=""
-            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-              INFO=$(resolve_newest_snapshot || true)
-              if [ -n "${INFO}" ]; then
-                CANDIDATE_ID=$(echo "${INFO}" | awk '{print $1}')
-                CANDIDATE_AGE=$(echo "${INFO}" | awk '{print $2}')
-                # Accept any snapshot less than 5 minutes old as
-                # "fresh enough" — covers both newly-minted and
-                # in-flight-from-another-run cases.
-                if [ -n "${CANDIDATE_ID}" ] && [ "${CANDIDATE_AGE}" -ge 0 ] && [ "${CANDIDATE_AGE}" -le 300 ]; then
-                  SNAP_ID="${CANDIDATE_ID}"
-                  echo "Resolved fresh snapshot ${SNAP_ID} (age ${CANDIDATE_AGE}s) on attempt ${attempt}"
-                  break
-                fi
-              fi
-              echo "Fresh snapshot not yet visible (attempt ${attempt})"
-              sleep 5
-            done
-            if [ -z "${SNAP_ID}" ]; then
-              echo "::error::Failed to resolve a fresh snapshot id after 12 attempts"
-              exit 1
+            # Stage 3: fall back to newest existing snapshot if < absolute max
+            if [ -z "${SNAP_ID}" ] && [ -n "${EXISTING_ID}" ] && [ -n "${EXISTING_AGE}" ] \
+               && [ "${EXISTING_AGE}" -ge 0 ] \
+               && [ "${EXISTING_AGE}" -le "${ABSOLUTE_MAX_S}" ]; then
+              SNAP_ID="${EXISTING_ID}"
+              echo "::warning::Stage 3: falling back to existing snapshot ${SNAP_ID} (age ${EXISTING_AGE}s > ${REUSE_WINDOW_S}s reuse window but <= ${ABSOLUTE_MAX_S}s absolute max). Staging will boot from slightly older prod state."
             fi
+          fi
+
+          if [ -z "${SNAP_ID}" ]; then
+            echo "::error::No usable snapshot available — none exist, none under absolute max age (${SNAPSHOT_ABSOLUTE_MAX_AGE_HOURS}h), and fresh snapshot creation failed. Check the prod volume's snapshot retention policy."
+            exit 1
           fi
 
           # Create the staging volume on the staging app from the
