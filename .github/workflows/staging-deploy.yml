@@ -222,10 +222,15 @@ jobs:
       - name: Set staging secrets
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          # Reused from prod
+          # Reused from prod if present as GH secrets — if NOT present
+          # here, we skip setting them so any value already on the Fly
+          # staging app (set manually via `fly secrets set`) is
+          # preserved. This mirrors how the prod app is configured:
+          # JINA_API_KEY is set once on the prod Fly app and inherited
+          # by every deploy; the GH Action never touches it.
           JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
           GITHUB_ORG_CHECK_TOKEN: ${{ secrets.GITHUB_ORG_CHECK_TOKEN }}
-          # Staging-specific
+          # Staging-specific — these are ALWAYS set by the workflow.
           STAGING_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
           STAGING_GITHUB_CLIENT_ID: ${{ secrets.STAGING_GITHUB_CLIENT_ID }}
           STAGING_GITHUB_CLIENT_SECRET: ${{ secrets.STAGING_GITHUB_CLIENT_SECRET }}
@@ -236,14 +241,30 @@ jobs:
           # (no org gating).
           STAGING_ALLOWED_ORGS: ${{ vars.STAGING_ALLOWED_ORGS }}
         run: |
-          flyctl secrets set --stage -a "${STAGING_APP}" \
-            "JINA_API_KEY=${JINA_API_KEY}" \
-            "GITHUB_CLIENT_ID=${STAGING_GITHUB_CLIENT_ID}" \
-            "GITHUB_CLIENT_SECRET=${STAGING_GITHUB_CLIENT_SECRET}" \
-            "DISTILLERY_BASE_URL=https://${STAGING_APP}.fly.dev" \
-            "DISTILLERY_WEBHOOK_SECRET=${STAGING_WEBHOOK_SECRET}" \
-            "GITHUB_ORG_CHECK_TOKEN=${GITHUB_ORG_CHECK_TOKEN}" \
+          set -euo pipefail
+          # Build the secrets-set argument list dynamically. Skip any
+          # "reused from prod" secret whose GH source is empty — we'd
+          # rather leave whatever is already set on the Fly app than
+          # clobber it with an empty string and crash the app on boot.
+          # Staging-specific secrets (webhook, OAuth client/secret,
+          # base URL, allowed orgs) are always applied.
+          SET_ARGS=()
+          if [ -n "${JINA_API_KEY}" ]; then
+            SET_ARGS+=("JINA_API_KEY=${JINA_API_KEY}")
+          else
+            echo "::notice::JINA_API_KEY GH secret is empty — preserving whatever is already set on the Fly staging app. If the app fails to boot with 'Jina API key not found', set it manually once with: fly secrets set JINA_API_KEY=<key> -a ${STAGING_APP}"
+          fi
+          if [ -n "${GITHUB_ORG_CHECK_TOKEN}" ]; then
+            SET_ARGS+=("GITHUB_ORG_CHECK_TOKEN=${GITHUB_ORG_CHECK_TOKEN}")
+          fi
+          SET_ARGS+=(
+            "GITHUB_CLIENT_ID=${STAGING_GITHUB_CLIENT_ID}"
+            "GITHUB_CLIENT_SECRET=${STAGING_GITHUB_CLIENT_SECRET}"
+            "DISTILLERY_BASE_URL=https://${STAGING_APP}.fly.dev"
+            "DISTILLERY_WEBHOOK_SECRET=${STAGING_WEBHOOK_SECRET}"
             "DISTILLERY_ALLOWED_ORGS=${STAGING_ALLOWED_ORGS}"
+          )
+          flyctl secrets set --stage -a "${STAGING_APP}" "${SET_ARGS[@]}"
 
       - name: Deploy staging image
         env:
