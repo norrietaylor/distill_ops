@@ -35,6 +35,7 @@ jobs:
   deploy:
     name: Deploy staging
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     concurrency:
       group: fly-staging
       cancel-in-progress: true
@@ -52,6 +53,30 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # v1.5
+
+      - name: Validate IMAGE_TAG
+        run: |
+          # Defense in depth — IMAGE_TAG flows into `flyctl deploy
+          # --build-arg` which executes inside a shell. The value
+          # originates from a trusted collaborator token (the only way
+          # to fire a repository_dispatch here), but we still constrain
+          # it to the known-good tag formats produced by the distillery
+          # staging-deploy workflow to eliminate any injection surface.
+          case "${IMAGE_TAG}" in
+            pr-[0-9]*-sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches PR build format"
+              ;;
+            sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches prod sha tag format"
+              ;;
+            staging|latest)
+              echo "IMAGE_TAG=${IMAGE_TAG} matches floating tag format"
+              ;;
+            *)
+              echo "::error::IMAGE_TAG='${IMAGE_TAG}' does not match any allowed format. Expected pr-N-sha-<7hex>, sha-<7hex>, staging, or latest."
+              exit 1
+              ;;
+          esac
 
       - name: Ensure staging app exists
         env:
