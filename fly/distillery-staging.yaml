@@ -1,0 +1,39 @@
+# Fly.io Distillery configuration — staging app (distillery-mcp-dev).
+#
+# Identical to distillery-fly.yaml except that the database path is
+# served from a forked volume (see staging-deploy.yml) and the OAuth
+# app is a separate staging GitHub OAuth app.
+#
+# Secrets (set by staging-deploy.yml via `fly secrets set`):
+#   JINA_API_KEY          — reused from prod
+#   GITHUB_CLIENT_ID      — STAGING GitHub OAuth app client ID
+#   GITHUB_CLIENT_SECRET  — STAGING GitHub OAuth app client secret
+#   DISTILLERY_BASE_URL   — https://distillery-mcp-dev.fly.dev
+#   DISTILLERY_WEBHOOK_SECRET — STAGING webhook bearer token
+
+storage:
+  backend: duckdb
+  database_path: /data/distillery.db
+
+embedding:
+  provider: jina
+  model: jina-embeddings-v3
+  dimensions: 1024
+  api_key_env: JINA_API_KEY
+
+team:
+  name: ""
+
+rate_limit:
+  embedding_budget_daily: 500
+  max_db_size_mb: 900
+  warn_db_size_pct: 80
+
+server:
+  auth:
+    provider: github
+    client_id_env: GITHUB_CLIENT_ID
+    client_secret_env: GITHUB_CLIENT_SECRET
+  webhooks:
+    enabled: true
+    secret_env: DISTILLERY_WEBHOOK_SECRET

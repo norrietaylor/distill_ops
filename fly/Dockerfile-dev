@@ -1,0 +1,42 @@
+# Fly.io deployment — staging variant.
+#
+# Extends the generic Distillery image with the staging config file.
+# The image tag is supplied by the staging-deploy workflow and resolves
+# to a branch build of the form pr-<N>-sha-<short> pushed by the
+# distillery repo's staging-deploy.yml workflow.
+
+ARG IMAGE_TAG=staging
+FROM ghcr.io/norrietaylor/distillery:${IMAGE_TAG}
+
+USER root
+
+# FastMCP's OAuth state (registered clients + issued access tokens)
+# lives under FASTMCP_HOME — same layout as prod. The staging volume
+# is forked from prod's volume, which means /data/fastmcp/* is copied
+# along with the DuckDB file. That copy includes prod's entire OAuth
+# token store, so without intervention any client already authorised
+# against prod would be silently accepted by staging (the local token
+# store validates signature + expiry, not issuing OAuth app identity).
+#
+# The startup script below wipes FASTMCP_HOME on every boot to ensure
+# staging begins with a clean OAuth state backed by the SEPARATE
+# staging OAuth app. This is the whole point of issuing a distinct
+# staging client_id / client_secret.
+ENV FASTMCP_HOME=/data/fastmcp
+
+# Copy staging-specific config
+COPY fly/distillery-staging.yaml /app/distillery-staging.yaml
+ENV DISTILLERY_CONFIG=/app/distillery-staging.yaml
+
+RUN chown -R appuser:appuser /app
+
+EXPOSE 8000
+
+# Fix volume ownership at runtime (only if not already owned — the
+# recursive chown gets expensive as the forked DB grows, and on all
+# boots after the first of a given deploy it's a no-op), wipe
+# inherited FastMCP OAuth state, then drop to appuser. The staging
+# volume is forked fresh from prod on every deploy, so unconditional
+# wipes of /data/fastmcp are safe — there is no legitimate staging
+# OAuth state to preserve across deploys.
+CMD ["sh", "-c", "if [ \"$(stat -c %U /data 2>/dev/null)\" != appuser ]; then chown -R appuser:appuser /data; fi && rm -rf /data/fastmcp && install -d -o appuser -g appuser /data/fastmcp && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]

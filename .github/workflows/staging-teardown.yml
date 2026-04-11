@@ -1,0 +1,108 @@
+name: Staging Teardown (Fly.io)
+
+# Tear down the singleton staging app distillery-mcp-dev. Triggered
+# via repository_dispatch from the distillery repo's staging-deploy.yml
+# workflow when a PR is closed or when `/teardown-staging` is commented.
+#
+# What this does:
+#   1. Stops all machines on distillery-mcp-dev (releases compute)
+#   2. Destroys the forked staging volume (releases the snapshot data)
+#   3. Comments on the source PR (if known) confirming teardown
+#
+# The staging app itself is left in place so the next /deploy-staging
+# can fork a fresh prod volume into it without re-running `fly apps
+# create`. The safety cron (staging-cleanup.yml) will also reach this
+# same end state for any staging env left running after 24h.
+
+on:
+  repository_dispatch:
+    types: [staging-teardown]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Source distillery PR number (optional, for comment-back)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  teardown:
+    name: Teardown staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: fly-staging
+      cancel-in-progress: false
+    env:
+      STAGING_APP: distillery-mcp-dev
+      STAGING_VOLUME_NAME: distillery_staging_data
+      PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+      SOURCE_REPO: ${{ github.event.client_payload.repo || 'norrietaylor/distillery' }}
+      REASON: ${{ github.event.client_payload.reason || 'manual' }}
+
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # v1.5
+
+      - name: Check staging app exists
+        id: check
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if flyctl status -a "${STAGING_APP}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Staging app ${STAGING_APP} does not exist — nothing to tear down"
+          fi
+
+      - name: Destroy staging machines
+        if: steps.check.outputs.exists == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `machine destroy -f` both halts the machine and detaches
+          # the volume in one atomic step, unlike `machine stop` which
+          # returns before the halt completes and leaves the volume
+          # attached — blocking the subsequent volumes destroy.
+          #
+          # Fail fast on any destroy error: a teardown that returns
+          # success while machines or volumes actually remain leaves
+          # cost leaks and bogus PR comments claiming teardown is
+          # complete. Better to surface the failure loudly.
+          MACHINE_IDS=$(flyctl machines list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))")
+          for mid in ${MACHINE_IDS}; do
+            echo "Destroying machine ${mid}"
+            if ! flyctl machine destroy -f "${mid}" -a "${STAGING_APP}"; then
+              echo "::error::Failed to destroy staging machine ${mid}"
+              exit 1
+            fi
+          done
+
+      - name: Destroy staging volume(s)
+        if: steps.check.outputs.exists == 'true'
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          VOL_IDS=$(flyctl volumes list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(v['id'] for v in json.load(sys.stdin) if v['name']=='${STAGING_VOLUME_NAME}'))")
+          for vid in ${VOL_IDS}; do
+            echo "Destroying staging volume ${vid}"
+            if ! flyctl volumes destroy "${vid}" -y; then
+              echo "::error::Failed to destroy staging volume ${vid}"
+              exit 1
+            fi
+          done
+
+      - name: Comment on source PR
+        if: env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.DISTILLERY_PR_COMMENT_TOKEN }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh pr comment "${PR_NUMBER}" --repo "${SOURCE_REPO}" \
+            --body "🧹 Staging torn down (reason: \`${REASON}\`) — ${RUN_URL}" || true

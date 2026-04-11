@@ -1,0 +1,285 @@
+name: Staging Deploy (Fly.io)
+
+# Deploy a Distillery branch build to the singleton staging app
+# distillery-mcp-dev. Triggered via repository_dispatch from the
+# distillery repo's staging-deploy.yml workflow (which handles the
+# /deploy-staging PR comment and the GHCR build).
+#
+# Database isolation: the prod Fly volume (distillery_data) is forked
+# into a fresh volume (distillery_staging_data) on every deploy. The
+# fork is a point-in-time atomic filesystem snapshot, so both the
+# distillery.db and .wal files land consistently. The forked volume is
+# destroyed on teardown (see staging-teardown.yml).
+
+on:
+  repository_dispatch:
+    types: [staging-deploy]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR image tag to deploy (e.g. pr-42-sha-abc1234)"
+        required: true
+      pr_number:
+        description: "Source distillery PR number (for comment-back)"
+        required: false
+        default: ""
+      head_sha:
+        description: "Source distillery head SHA (for display)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      # All fly-staging operations (deploy, teardown, cleanup)
+      # serialize in the same group with cancel-in-progress: false so
+      # a newly dispatched deploy cannot interrupt an in-flight
+      # teardown or safety-cleanup mid-destroy. A second
+      # /deploy-staging queues instead of cancelling; the wait is
+      # bounded by the deploy timeout-minutes cap above.
+      group: fly-staging
+      cancel-in-progress: false
+    env:
+      STAGING_APP: distillery-mcp-dev
+      PROD_APP: distillery-mcp
+      PROD_VOLUME_NAME: distillery_data
+      STAGING_VOLUME_NAME: distillery_staging_data
+      IMAGE_TAG: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag }}
+      PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number }}
+      HEAD_SHA: ${{ github.event.client_payload.head_sha || github.event.inputs.head_sha }}
+      SOURCE_REPO: ${{ github.event.client_payload.repo || 'norrietaylor/distillery' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # v1.5
+
+      - name: Validate IMAGE_TAG
+        run: |
+          # Defense in depth — IMAGE_TAG flows into `flyctl deploy
+          # --build-arg` which executes inside a shell. The value
+          # originates from a trusted collaborator token (the only way
+          # to fire a repository_dispatch here), but we still constrain
+          # it to the known-good tag formats produced by the distillery
+          # staging-deploy workflow to eliminate any injection surface.
+          case "${IMAGE_TAG}" in
+            pr-[0-9]*-sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches PR build format"
+              ;;
+            sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches prod sha tag format"
+              ;;
+            staging|latest)
+              echo "IMAGE_TAG=${IMAGE_TAG} matches floating tag format"
+              ;;
+            *)
+              echo "::error::IMAGE_TAG='${IMAGE_TAG}' does not match any allowed format. Expected pr-N-sha-<7hex>, sha-<7hex>, staging, or latest."
+              exit 1
+              ;;
+          esac
+
+      - name: Ensure staging app exists
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_ORG: ${{ vars.FLY_ORG || 'personal' }}
+        run: |
+          if ! flyctl status -a "${STAGING_APP}" >/dev/null 2>&1; then
+            echo "Staging app ${STAGING_APP} does not exist — creating in org ${FLY_ORG}"
+            flyctl apps create "${STAGING_APP}" --org "${FLY_ORG}"
+          else
+            echo "Staging app ${STAGING_APP} already exists"
+          fi
+
+      - name: Discard stale staging machines and volumes
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Destroy any pre-existing machines FIRST — `flyctl volumes
+          # destroy` refuses while a volume is attached, and `machine
+          # stop` returns before the stop completes. `machine destroy
+          # -f` both halts the machine and detaches the volume in one
+          # step, which is what we need before the volume destroy.
+          #
+          # Fail fast on any destroy error: orphaned machines or
+          # volumes will collide with the new snapshot-create below
+          # and silently undermine the "fresh fork per deploy"
+          # isolation guarantee, so it's safer to abort and surface
+          # the problem than to continue.
+          MACHINE_IDS=$(flyctl machines list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))")
+          for mid in ${MACHINE_IDS}; do
+            echo "Destroying stale staging machine ${mid}"
+            if ! flyctl machine destroy -f "${mid}" -a "${STAGING_APP}"; then
+              echo "::error::Failed to destroy stale staging machine ${mid}"
+              exit 1
+            fi
+          done
+
+          # Now destroy any pre-existing staging volumes so the new
+          # fork reflects fresh prod state. Multiple volumes with the
+          # same name are possible after prior crashes — destroy all.
+          STALE_IDS=$(flyctl volumes list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(v['id'] for v in json.load(sys.stdin) if v['name']=='${STAGING_VOLUME_NAME}'))")
+          for vid in ${STALE_IDS}; do
+            echo "Destroying stale staging volume ${vid}"
+            if ! flyctl volumes destroy "${vid}" -y; then
+              echo "::error::Failed to destroy stale staging volume ${vid}"
+              exit 1
+            fi
+          done
+
+      - name: Resolve prod volume id, region, and size
+        id: prod_vol
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Pick the first volume on prod with the configured name.
+          # We need id, region, and size_gb so the snapshot-restored
+          # staging volume is created at the right size.
+          INFO=$(flyctl volumes list -a "${PROD_APP}" --json \
+            | python3 -c "
+          import json, sys
+          vs = [v for v in json.load(sys.stdin) if v['name']=='${PROD_VOLUME_NAME}']
+          assert vs, 'no prod volume found with name ${PROD_VOLUME_NAME}'
+          v = vs[0]
+          size = v.get('size_gb') or v.get('SizeGb') or 1
+          print(v['id'], v['region'], size)
+          ")
+          VOL_ID=$(echo "${INFO}" | awk '{print $1}')
+          REGION=$(echo "${INFO}" | awk '{print $2}')
+          SIZE=$(echo "${INFO}" | awk '{print $3}')
+          echo "vol_id=${VOL_ID}" >> "$GITHUB_OUTPUT"
+          echo "region=${REGION}" >> "$GITHUB_OUTPUT"
+          echo "size=${SIZE}" >> "$GITHUB_OUTPUT"
+          echo "Prod volume ${VOL_ID} in region ${REGION} (${SIZE} GB)"
+
+      - name: Snapshot prod volume and create staging volume from snapshot
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # We use snapshot → create rather than `volumes fork --app`
+          # because fork is same-app only (the --app flag on fork was
+          # not reliable across flyctl versions). The snapshot path is
+          # the documented, stable way to clone a volume into a
+          # different app.
+          #
+          # 1. Take an on-demand snapshot of the prod volume. Fly
+          #    snapshots are crash-consistent at the filesystem layer,
+          #    which is what DuckDB needs for WAL recovery on first
+          #    open of the staging DB.
+          echo "Creating snapshot of prod volume ${{ steps.prod_vol.outputs.vol_id }}"
+          flyctl volumes snapshots create "${{ steps.prod_vol.outputs.vol_id }}" -a "${PROD_APP}"
+
+          # 2. Wait a moment for the snapshot to finalise, then resolve
+          #    its ID (the most recent snapshot on the prod volume).
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            SNAP_ID=$(flyctl volumes snapshots list "${{ steps.prod_vol.outputs.vol_id }}" -a "${PROD_APP}" --json 2>/dev/null \
+              | python3 -c "
+          import json, sys
+          try:
+              snaps = json.load(sys.stdin)
+          except Exception:
+              print('')
+              sys.exit(0)
+          if not snaps:
+              print('')
+              sys.exit(0)
+          def ts(s):
+              return s.get('created_at') or s.get('CreatedAt') or ''
+          snaps.sort(key=ts, reverse=True)
+          print(snaps[0].get('id') or snaps[0].get('ID') or '')
+          ")
+            if [ -n "${SNAP_ID}" ]; then
+              echo "Resolved snapshot id ${SNAP_ID} on attempt ${attempt}"
+              break
+            fi
+            echo "Snapshot not yet visible, retrying (attempt ${attempt})"
+            sleep 3
+          done
+          if [ -z "${SNAP_ID}" ]; then
+            echo "::error::Failed to resolve newly created snapshot id after 10 attempts"
+            exit 1
+          fi
+
+          # 3. Create the staging volume on the staging app from the
+          #    snapshot. Size and region match prod so the fork-in-
+          #    spirit is exact.
+          echo "Creating staging volume from snapshot ${SNAP_ID}"
+          flyctl volumes create "${STAGING_VOLUME_NAME}" \
+            --snapshot-id "${SNAP_ID}" \
+            --region "${{ steps.prod_vol.outputs.region }}" \
+            --size "${{ steps.prod_vol.outputs.size }}" \
+            --yes \
+            -a "${STAGING_APP}"
+
+      - name: Set staging secrets
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # Reused from prod
+          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+          GITHUB_ORG_CHECK_TOKEN: ${{ secrets.GITHUB_ORG_CHECK_TOKEN }}
+          # Staging-specific
+          STAGING_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
+          STAGING_GITHUB_CLIENT_ID: ${{ secrets.STAGING_GITHUB_CLIENT_ID }}
+          STAGING_GITHUB_CLIENT_SECRET: ${{ secrets.STAGING_GITHUB_CLIENT_SECRET }}
+          # Org gate — staging serves a forked copy of prod's KB, so
+          # by default we restrict login to members of the org(s) set
+          # in the STAGING_ALLOWED_ORGS repo variable (comma-separated).
+          # If the variable is unset, staging inherits prod's posture
+          # (no org gating).
+          STAGING_ALLOWED_ORGS: ${{ vars.STAGING_ALLOWED_ORGS }}
+        run: |
+          flyctl secrets set --stage -a "${STAGING_APP}" \
+            "JINA_API_KEY=${JINA_API_KEY}" \
+            "GITHUB_CLIENT_ID=${STAGING_GITHUB_CLIENT_ID}" \
+            "GITHUB_CLIENT_SECRET=${STAGING_GITHUB_CLIENT_SECRET}" \
+            "DISTILLERY_BASE_URL=https://${STAGING_APP}.fly.dev" \
+            "DISTILLERY_WEBHOOK_SECRET=${STAGING_WEBHOOK_SECRET}" \
+            "GITHUB_ORG_CHECK_TOKEN=${GITHUB_ORG_CHECK_TOKEN}" \
+            "DISTILLERY_ALLOWED_ORGS=${STAGING_ALLOWED_ORGS}"
+
+      - name: Deploy staging image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy \
+            -c fly/fly-dev.toml \
+            --dockerfile fly/Dockerfile-dev \
+            --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+            -a "${STAGING_APP}"
+
+      - name: Comment on source PR
+        if: env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.DISTILLERY_PR_COMMENT_TOKEN }}
+        run: |
+          SCHED_URL="https://github.com/${{ github.repository }}/actions/workflows/scheduler-staging.yml"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY=$(cat <<EOF
+          ✅ Staging deployed from \`${HEAD_SHA:0:7}\`
+
+          - URL: https://${STAGING_APP}.fly.dev
+          - Image: \`${IMAGE_TAG}\`
+          - Deploy run: ${RUN_URL}
+          - Scheduler (on-demand): ${SCHED_URL}
+
+          Comment \`/teardown-staging\` or close the PR to tear down.
+          EOF
+          )
+          gh pr comment "${PR_NUMBER}" --repo "${SOURCE_REPO}" --body "${BODY}"
+
+      - name: Comment failure on source PR
+        if: failure() && env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.DISTILLERY_PR_COMMENT_TOKEN }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh pr comment "${PR_NUMBER}" --repo "${SOURCE_REPO}" \
+            --body "❌ Staging deploy failed — see ${RUN_URL}"
