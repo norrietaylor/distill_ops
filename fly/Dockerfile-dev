@@ -10,8 +10,18 @@ FROM ghcr.io/norrietaylor/distillery:${IMAGE_TAG}
 
 USER root
 
-# Persist FastMCP OAuth state on the Fly volume so tokens survive
-# machine autostop/restart cycles (same as prod).
+# FastMCP's OAuth state (registered clients + issued access tokens)
+# lives under FASTMCP_HOME — same layout as prod. The staging volume
+# is forked from prod's volume, which means /data/fastmcp/* is copied
+# along with the DuckDB file. That copy includes prod's entire OAuth
+# token store, so without intervention any client already authorised
+# against prod would be silently accepted by staging (the local token
+# store validates signature + expiry, not issuing OAuth app identity).
+#
+# The startup script below wipes FASTMCP_HOME on every boot to ensure
+# staging begins with a clean OAuth state backed by the SEPARATE
+# staging OAuth app. This is the whole point of issuing a distinct
+# staging client_id / client_secret.
 ENV FASTMCP_HOME=/data/fastmcp
 
 # Copy staging-specific config
@@ -22,8 +32,8 @@ RUN chown -R appuser:appuser /app
 
 EXPOSE 8000
 
-# Fix volume ownership at runtime, then drop to appuser.
-# The staging volume is forked fresh from prod on every deploy, so
-# RESET_DB is intentionally NOT wired up here — use the teardown
-# workflow to discard staging state instead.
-CMD ["sh", "-c", "chown -R appuser:appuser /data && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]
+# Fix volume ownership at runtime, wipe inherited FastMCP OAuth state,
+# then drop to appuser. The staging volume is forked fresh from prod
+# on every deploy, so unconditional wipes are safe — there is no
+# legitimate staging OAuth state to preserve across deploys.
+CMD ["sh", "-c", "chown -R appuser:appuser /data && rm -rf /data/fastmcp && mkdir -p /data/fastmcp && chown -R appuser:appuser /data/fastmcp && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]

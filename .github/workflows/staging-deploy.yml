@@ -91,31 +91,89 @@ jobs:
             flyctl volumes destroy "${vid}" -y || true
           done
 
-      - name: Resolve prod volume id and region
+      - name: Resolve prod volume id, region, and size
         id: prod_vol
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           # Pick the first volume on prod with the configured name.
+          # We need id, region, and size_gb so the snapshot-restored
+          # staging volume is created at the right size.
           INFO=$(flyctl volumes list -a "${PROD_APP}" --json \
-            | python3 -c "import json,sys; vs=[v for v in json.load(sys.stdin) if v['name']=='${PROD_VOLUME_NAME}']; assert vs, 'no prod volume'; print(vs[0]['id'], vs[0]['region'])")
+            | python3 -c "
+          import json, sys
+          vs = [v for v in json.load(sys.stdin) if v['name']=='${PROD_VOLUME_NAME}']
+          assert vs, 'no prod volume found with name ${PROD_VOLUME_NAME}'
+          v = vs[0]
+          size = v.get('size_gb') or v.get('SizeGb') or 1
+          print(v['id'], v['region'], size)
+          ")
           VOL_ID=$(echo "${INFO}" | awk '{print $1}')
           REGION=$(echo "${INFO}" | awk '{print $2}')
+          SIZE=$(echo "${INFO}" | awk '{print $3}')
           echo "vol_id=${VOL_ID}" >> "$GITHUB_OUTPUT"
           echo "region=${REGION}" >> "$GITHUB_OUTPUT"
-          echo "Prod volume ${VOL_ID} in region ${REGION}"
+          echo "size=${SIZE}" >> "$GITHUB_OUTPUT"
+          echo "Prod volume ${VOL_ID} in region ${REGION} (${SIZE} GB)"
 
-      - name: Fork prod volume into staging app
+      - name: Snapshot prod volume and create staging volume from snapshot
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          # `flyctl volumes fork` creates a point-in-time copy. We
-          # target the staging app with --app so the fork is attached
-          # there rather than back onto prod.
-          flyctl volumes fork "${{ steps.prod_vol.outputs.vol_id }}" \
-            --name "${STAGING_VOLUME_NAME}" \
-            --app "${STAGING_APP}" \
-            --region "${{ steps.prod_vol.outputs.region }}"
+          # We use snapshot → create rather than `volumes fork --app`
+          # because fork is same-app only (the --app flag on fork was
+          # not reliable across flyctl versions). The snapshot path is
+          # the documented, stable way to clone a volume into a
+          # different app.
+          #
+          # 1. Take an on-demand snapshot of the prod volume. Fly
+          #    snapshots are crash-consistent at the filesystem layer,
+          #    which is what DuckDB needs for WAL recovery on first
+          #    open of the staging DB.
+          echo "Creating snapshot of prod volume ${{ steps.prod_vol.outputs.vol_id }}"
+          flyctl volumes snapshots create "${{ steps.prod_vol.outputs.vol_id }}" -a "${PROD_APP}"
+
+          # 2. Wait a moment for the snapshot to finalise, then resolve
+          #    its ID (the most recent snapshot on the prod volume).
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            SNAP_ID=$(flyctl volumes snapshots list "${{ steps.prod_vol.outputs.vol_id }}" -a "${PROD_APP}" --json 2>/dev/null \
+              | python3 -c "
+          import json, sys
+          try:
+              snaps = json.load(sys.stdin)
+          except Exception:
+              print('')
+              sys.exit(0)
+          if not snaps:
+              print('')
+              sys.exit(0)
+          def ts(s):
+              return s.get('created_at') or s.get('CreatedAt') or ''
+          snaps.sort(key=ts, reverse=True)
+          print(snaps[0].get('id') or snaps[0].get('ID') or '')
+          ")
+            if [ -n "${SNAP_ID}" ]; then
+              echo "Resolved snapshot id ${SNAP_ID} on attempt ${attempt}"
+              break
+            fi
+            echo "Snapshot not yet visible, retrying (attempt ${attempt})"
+            sleep 3
+          done
+          if [ -z "${SNAP_ID}" ]; then
+            echo "::error::Failed to resolve newly created snapshot id after 10 attempts"
+            exit 1
+          fi
+
+          # 3. Create the staging volume on the staging app from the
+          #    snapshot. Size and region match prod so the fork-in-
+          #    spirit is exact.
+          echo "Creating staging volume from snapshot ${SNAP_ID}"
+          flyctl volumes create "${STAGING_VOLUME_NAME}" \
+            --snapshot-id "${SNAP_ID}" \
+            --region "${{ steps.prod_vol.outputs.region }}" \
+            --size "${{ steps.prod_vol.outputs.size }}" \
+            --yes \
+            -a "${STAGING_APP}"
 
       - name: Set staging secrets
         env:
