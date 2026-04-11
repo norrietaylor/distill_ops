@@ -56,16 +56,20 @@ jobs:
             echo "Staging app ${STAGING_APP} does not exist — nothing to tear down"
           fi
 
-      - name: Stop all staging machines
+      - name: Destroy staging machines
         if: steps.check.outputs.exists == 'true'
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
+          # `machine destroy -f` both halts the machine and detaches
+          # the volume in one atomic step, unlike `machine stop` which
+          # returns before the halt completes and leaves the volume
+          # attached — blocking the subsequent volumes destroy.
           MACHINE_IDS=$(flyctl machines list -a "${STAGING_APP}" --json 2>/dev/null \
             | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))")
           for mid in ${MACHINE_IDS}; do
-            echo "Stopping machine ${mid}"
-            flyctl machine stop "${mid}" -a "${STAGING_APP}" || true
+            echo "Destroying machine ${mid}"
+            flyctl machine destroy -f "${mid}" -a "${STAGING_APP}" || true
           done
 
       - name: Destroy staging volume(s)

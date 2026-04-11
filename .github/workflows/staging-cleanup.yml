@@ -72,16 +72,18 @@ jobs:
           echo "state=${LATEST}" >> "$GITHUB_OUTPUT"
           echo "Staging release state: ${LATEST}"
 
-      - name: Stop all staging machines
+      - name: Destroy stale staging machines
         if: steps.check.outputs.exists == 'true' && (steps.stale.outputs.state == 'stale' || steps.stale.outputs.state == 'none')
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
+          # See staging-teardown.yml for why we destroy rather than
+          # stop — avoids the stop→destroy-volume race.
           MACHINE_IDS=$(flyctl machines list -a "${STAGING_APP}" --json 2>/dev/null \
             | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))")
           for mid in ${MACHINE_IDS}; do
-            echo "Stopping machine ${mid}"
-            flyctl machine stop "${mid}" -a "${STAGING_APP}" || true
+            echo "Destroying stale machine ${mid}"
+            flyctl machine destroy -f "${mid}" -a "${STAGING_APP}" || true
           done
 
       - name: Destroy staging volume(s)

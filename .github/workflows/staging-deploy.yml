@@ -56,21 +56,34 @@ jobs:
       - name: Ensure staging app exists
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_ORG: ${{ vars.FLY_ORG || 'personal' }}
         run: |
           if ! flyctl status -a "${STAGING_APP}" >/dev/null 2>&1; then
-            echo "Staging app ${STAGING_APP} does not exist — creating"
-            flyctl apps create "${STAGING_APP}" --org personal
+            echo "Staging app ${STAGING_APP} does not exist — creating in org ${FLY_ORG}"
+            flyctl apps create "${STAGING_APP}" --org "${FLY_ORG}"
           else
             echo "Staging app ${STAGING_APP} already exists"
           fi
 
-      - name: Discard stale staging volume
+      - name: Discard stale staging machines and volumes
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          # Destroy any pre-existing staging volume so the new fork
-          # reflects fresh prod state. Multiple volumes with the same
-          # name are possible after prior crashes — destroy all.
+          # Destroy any pre-existing machines FIRST — `flyctl volumes
+          # destroy` refuses while a volume is attached, and `machine
+          # stop` returns before the stop completes. `machine destroy
+          # -f` both halts the machine and detaches the volume in one
+          # step, which is what we need before the volume destroy.
+          MACHINE_IDS=$(flyctl machines list -a "${STAGING_APP}" --json 2>/dev/null \
+            | python3 -c "import json,sys; print(' '.join(m['id'] for m in json.load(sys.stdin)))")
+          for mid in ${MACHINE_IDS}; do
+            echo "Destroying stale staging machine ${mid}"
+            flyctl machine destroy -f "${mid}" -a "${STAGING_APP}" || true
+          done
+
+          # Now destroy any pre-existing staging volumes so the new
+          # fork reflects fresh prod state. Multiple volumes with the
+          # same name are possible after prior crashes — destroy all.
           STALE_IDS=$(flyctl volumes list -a "${STAGING_APP}" --json 2>/dev/null \
             | python3 -c "import json,sys; print(' '.join(v['id'] for v in json.load(sys.stdin) if v['name']=='${STAGING_VOLUME_NAME}'))")
           for vid in ${STALE_IDS}; do
@@ -114,6 +127,12 @@ jobs:
           STAGING_WEBHOOK_SECRET: ${{ secrets.STAGING_WEBHOOK_SECRET }}
           STAGING_GITHUB_CLIENT_ID: ${{ secrets.STAGING_GITHUB_CLIENT_ID }}
           STAGING_GITHUB_CLIENT_SECRET: ${{ secrets.STAGING_GITHUB_CLIENT_SECRET }}
+          # Org gate — staging serves a forked copy of prod's KB, so
+          # by default we restrict login to members of the org(s) set
+          # in the STAGING_ALLOWED_ORGS repo variable (comma-separated).
+          # If the variable is unset, staging inherits prod's posture
+          # (no org gating).
+          STAGING_ALLOWED_ORGS: ${{ vars.STAGING_ALLOWED_ORGS }}
         run: |
           flyctl secrets set --stage -a "${STAGING_APP}" \
             "JINA_API_KEY=${JINA_API_KEY}" \
@@ -121,7 +140,8 @@ jobs:
             "GITHUB_CLIENT_SECRET=${STAGING_GITHUB_CLIENT_SECRET}" \
             "DISTILLERY_BASE_URL=https://${STAGING_APP}.fly.dev" \
             "DISTILLERY_WEBHOOK_SECRET=${STAGING_WEBHOOK_SECRET}" \
-            "GITHUB_ORG_CHECK_TOKEN=${GITHUB_ORG_CHECK_TOKEN}"
+            "GITHUB_ORG_CHECK_TOKEN=${GITHUB_ORG_CHECK_TOKEN}" \
+            "DISTILLERY_ALLOWED_ORGS=${STAGING_ALLOWED_ORGS}"
 
       - name: Deploy staging image
         env:
