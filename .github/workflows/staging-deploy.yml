@@ -90,6 +90,19 @@ jobs:
               ;;
           esac
 
+      - name: Validate FRESH_DB
+        run: |
+          val="$(printf '%s' "${FRESH_DB}" | tr '[:upper:]' '[:lower:]')"
+          case "${val}" in
+            true|false)
+              echo "FRESH_DB=${val}" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::FRESH_DB='${FRESH_DB}' is invalid. Expected true or false."
+              exit 1
+              ;;
+          esac
+
       - name: Ensure staging app exists
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -142,7 +155,6 @@ jobs:
           done
 
       - name: Resolve prod volume id, region, and size
-        if: env.FRESH_DB != 'true'
         id: prod_vol
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -322,23 +334,10 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
           set -euo pipefail
-          # Resolve region and size from the prod volume so the empty
-          # staging volume is colocated and equivalently sized.
-          INFO=$(flyctl volumes list -a "${PROD_APP}" --json \
-            | python3 -c "
-          import json, sys
-          vs = [v for v in json.load(sys.stdin) if v['name']=='${PROD_VOLUME_NAME}']
-          assert vs, 'no prod volume found with name ${PROD_VOLUME_NAME}'
-          v = vs[0]
-          size = v.get('size_gb') or v.get('SizeGb') or 1
-          print(v['region'], size)
-          ")
-          REGION=$(echo "${INFO}" | awk '{print $1}')
-          SIZE=$(echo "${INFO}" | awk '{print $2}')
-          echo "Creating empty staging volume in ${REGION} (${SIZE} GB)"
+          echo "Creating empty staging volume in ${{ steps.prod_vol.outputs.region }} (${{ steps.prod_vol.outputs.size }} GB)"
           flyctl volumes create "${STAGING_VOLUME_NAME}" \
-            --region "${REGION}" \
-            --size "${SIZE}" \
+            --region "${{ steps.prod_vol.outputs.region }}" \
+            --size "${{ steps.prod_vol.outputs.size }}" \
             --yes \
             -a "${STAGING_APP}"
 
