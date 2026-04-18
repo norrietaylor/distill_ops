@@ -18,10 +18,10 @@ USER root
 # against prod would be silently accepted by staging (the local token
 # store validates signature + expiry, not issuing OAuth app identity).
 #
-# The startup script below wipes FASTMCP_HOME on every boot to ensure
-# staging begins with a clean OAuth state backed by the SEPARATE
-# staging OAuth app. This is the whole point of issuing a distinct
-# staging client_id / client_secret.
+# The startup script wipes FASTMCP_HOME on the FIRST boot of each
+# deploy (detected via a sentinel file) to ensure staging begins with
+# a clean OAuth state backed by the separate staging OAuth app, while
+# preserving tokens across Fly auto-suspend/resume cycles.
 ENV FASTMCP_HOME=/data/fastmcp
 
 # Copy staging-specific config
@@ -35,8 +35,19 @@ EXPOSE 8000
 # Fix volume ownership at runtime (only if not already owned — the
 # recursive chown gets expensive as the forked DB grows, and on all
 # boots after the first of a given deploy it's a no-op), wipe
-# inherited FastMCP OAuth state, then drop to appuser. The staging
-# volume is forked fresh from prod on every deploy, so unconditional
-# wipes of /data/fastmcp are safe — there is no legitimate staging
-# OAuth state to preserve across deploys.
-CMD ["sh", "-c", "if [ \"$(stat -c %U /data 2>/dev/null)\" != appuser ]; then chown -R appuser:appuser /data; fi && rm -rf /data/fastmcp && install -d -o appuser -g appuser /data/fastmcp && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]
+# inherited FastMCP OAuth state ONCE per deploy, then drop to appuser.
+#
+# The staging volume is forked fresh from prod on every deploy, so the
+# first boot must wipe /data/fastmcp to avoid inheriting prod tokens.
+# Subsequent boots (e.g. after Fly auto-suspend/resume) skip the wipe
+# so that staging OAuth sessions survive machine restarts. A sentinel
+# file (/data/fastmcp/.staged) tracks whether the wipe already ran
+# for this deploy cycle.
+CMD ["sh", "-c", "\
+  if [ \"$(stat -c %U /data 2>/dev/null)\" != appuser ]; then chown -R appuser:appuser /data; fi \
+  && if [ ! -f /data/fastmcp/.staged ]; then \
+       rm -rf /data/fastmcp \
+       && install -d -o appuser -g appuser /data/fastmcp \
+       && touch /data/fastmcp/.staged; \
+     fi \
+  && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]
