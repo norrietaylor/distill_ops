@@ -22,17 +22,43 @@ jobs:
   poll:
     name: Poll Feed Sources
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'poll' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '23 * * * *'
     steps:
+      - name: Warm Fly machine
+        env:
+          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+        run: |
+          # Wake the suspended Fly machine with a cheap GET and wait until
+          # the app is actually ready before issuing the webhook POST.
+          # The request that triggers the cold start is the one most likely
+          # to 502 — so we front-load that cost here.
+          deadline=$((SECONDS + 300))
+          attempt=0
+          until [ "$SECONDS" -ge "$deadline" ]; do
+            attempt=$((attempt + 1))
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              "${DISTILLERY_URL}/.well-known/oauth-authorization-server" || echo "000")
+            if [ "$code" = "200" ]; then
+              echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: HTTP ${code} — waiting for app..."
+            sleep 10
+          done
+          echo "::error::App did not become ready within 300s"
+          exit 1
       - name: Trigger poll webhook
         env:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
           DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
         run: |
-          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+          http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
+            --max-time 600 \
+            --retry 3 --retry-delay 15 --retry-all-errors \
+            -X POST \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
             "${DISTILLERY_URL}/api/poll")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
@@ -47,17 +73,39 @@ jobs:
   rescore:
     name: Rescore Feed Entries
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'rescore' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '17 6 * * *'
     steps:
+      - name: Warm Fly machine
+        env:
+          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+        run: |
+          deadline=$((SECONDS + 300))
+          attempt=0
+          until [ "$SECONDS" -ge "$deadline" ]; do
+            attempt=$((attempt + 1))
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              "${DISTILLERY_URL}/.well-known/oauth-authorization-server" || echo "000")
+            if [ "$code" = "200" ]; then
+              echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: HTTP ${code} — waiting for app..."
+            sleep 10
+          done
+          echo "::error::App did not become ready within 300s"
+          exit 1
       - name: Trigger rescore webhook
         env:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
           DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
         run: |
-          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+          http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
+            --max-time 600 \
+            --retry 3 --retry-delay 15 --retry-all-errors \
+            -X POST \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
             "${DISTILLERY_URL}/api/rescore")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
@@ -72,17 +120,39 @@ jobs:
   maintenance:
     name: Weekly KB Maintenance
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'maintenance' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '41 7 * * 1'
     steps:
+      - name: Warm Fly machine
+        env:
+          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+        run: |
+          deadline=$((SECONDS + 300))
+          attempt=0
+          until [ "$SECONDS" -ge "$deadline" ]; do
+            attempt=$((attempt + 1))
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              "${DISTILLERY_URL}/.well-known/oauth-authorization-server" || echo "000")
+            if [ "$code" = "200" ]; then
+              echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: HTTP ${code} — waiting for app..."
+            sleep 10
+          done
+          echo "::error::App did not become ready within 300s"
+          exit 1
       - name: Trigger maintenance webhook
         env:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
           DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
         run: |
-          http_code=$(curl -s -o /tmp/response.json -w '%{http_code}' -X POST \
+          http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
+            --max-time 600 \
+            --retry 3 --retry-delay 15 --retry-all-errors \
+            -X POST \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
             "${DISTILLERY_URL}/api/maintenance")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
