@@ -37,7 +37,10 @@ app = "distillery-mcp"
     timeout = "5s"
 
 [[vm]]
-  memory = "512mb"
+  # Bumped 512mb -> 1024mb on 2026-04-22 after the scheduled poll OOM-killed
+  # the app (anon-rss ~393MB + DuckDB mmap pushed past the 512MB cap).
+  # Underlying memory growth tracked in norrietaylor/distillery#396.
+  memory = "1024mb"
   cpu_kind = "shared"
   cpus = 1
 
