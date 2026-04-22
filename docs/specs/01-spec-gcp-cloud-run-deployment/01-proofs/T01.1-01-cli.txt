@@ -1,0 +1,35 @@
+Type: cli
+Command: bash gcp/bootstrap.sh --help
+Expected: prints usage, exits 0
+Timestamp: 2026-04-21T22:55:00Z
+Status: PASS
+
+--- OUTPUT ---
+Usage: bash gcp/bootstrap.sh --project <id> --region <region> --repo <owner/name>
+
+Idempotently provisions the GCP resources required by the Distillery Cloud
+Run deployment: APIs, data bucket, Artifact Registry repo, service
+accounts, IAM bindings, and a Workload Identity Federation pool/provider
+bound to the specified GitHub repo.
+
+Required arguments (flags or environment variables):
+  --project <id>          GCP project ID            (env: GCP_PROJECT)
+  --region  <region>      GCP region, e.g.          (env: GCP_REGION)
+                          us-central1
+  --repo    <owner/name>  GitHub repository the     (env: GCP_REPO)
+                          deploy workflow runs from
+
+Optional:
+  -h, --help              Print this message and exit
+
+Examples:
+  bash gcp/bootstrap.sh \
+    --project my-gcp-project \
+    --region  us-central1 \
+    --repo    norrietaylor/distill_ops
+
+  GCP_PROJECT=my-gcp-project GCP_REGION=us-central1 \
+    GCP_REPO=norrietaylor/distill_ops bash gcp/bootstrap.sh
+
+The script is safe to re-run; each step is idempotent.
+EXIT=0
