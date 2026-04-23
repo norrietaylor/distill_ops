@@ -188,6 +188,32 @@ create_bucket() {
   fi
 }
 
+# Artifact Registry Docker repo that holds the Cloud Run image. The CI
+# workflow tags images as
+#   <region>-docker.pkg.dev/<project>/distillery/distillery:<sha>
+# so the repo name is a constant `distillery` — parallel to the fly/
+# pattern of one repo per deployment target.
+AR_REPO="distillery"
+
+create_ar_repo() {
+  # describe -> conditional create, same pattern as the bucket step.
+  # Silencing create errors with `|| true` would hide permission or quota
+  # failures, so we gate on describe's exit code instead.
+  if gcloud artifacts repositories describe "$AR_REPO" \
+       --project="$PROJECT" \
+       --location="$REGION" \
+       --format='value(name)' >/dev/null 2>&1; then
+    log "artifact registry repo ${AR_REPO} already exists in ${REGION} — skipping"
+  else
+    log "creating artifact registry repo ${AR_REPO} (docker) in ${REGION}"
+    gcloud artifacts repositories create "$AR_REPO" \
+      --project="$PROJECT" \
+      --location="$REGION" \
+      --repository-format=docker \
+      --description="Distillery container images for the Cloud Run deployment"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -201,8 +227,9 @@ main() {
 
   enable_apis
   create_bucket
+  create_ar_repo
 
-  log "done (APIs enabled, data bucket ready). Later steps will be added by subsequent sub-tasks."
+  log "done (APIs enabled, data bucket ready, artifact registry ready). Later steps will be added by subsequent sub-tasks."
 }
 
 main "$@"

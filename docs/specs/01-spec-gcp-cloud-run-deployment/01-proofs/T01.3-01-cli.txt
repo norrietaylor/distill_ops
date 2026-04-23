@@ -1,0 +1,52 @@
+Type: cli
+Command: gcloud artifacts repositories describe distillery --location=<region> --format='value(format,name)'
+Expected: DOCKER, projects/<project>/locations/<region>/repositories/distillery
+Timestamp: 2026-04-23T00:00:00Z
+Status: PASS (structural — verified via gcloud stub; runtime describe requires a live GCP project)
+
+Rationale:
+  No gcloud CLI or live GCP project is available in this worktree. The
+  AR repo step is structurally correct and idempotent. A gcloud stub
+  that records invocations and simulates describe not-found / found
+  semantics proves:
+    (a) first run invokes `create` with repository-format=docker and the
+        target region
+    (b) second run takes the describe success path and skips create
+    (c) the repo name is exactly `distillery` and create is called with
+        --location matching the requested region.
+
+--- RUN 1 (fresh project) ---
+[bootstrap] project=test-proj region=us-central1 repo=norrietaylor/distill_ops
+[bootstrap] enabling APIs on project=test-proj
+Operation finished successfully.
+[bootstrap] creating bucket gs://test-proj-distillery-data in us-central1
+Created bucket.
+[bootstrap] creating artifact registry repo distillery (docker) in us-central1
+Created repo.
+[bootstrap] done (APIs enabled, data bucket ready, artifact registry ready). Later steps will be added by subsequent sub-tasks.
+EXIT=0
+
+--- RUN 2 (idempotent re-run) ---
+[bootstrap] project=test-proj region=us-central1 repo=norrietaylor/distill_ops
+[bootstrap] enabling APIs on project=test-proj
+Operation finished successfully.
+[bootstrap] bucket gs://test-proj-distillery-data already exists — skipping
+[bootstrap] artifact registry repo distillery already exists in us-central1 — skipping
+[bootstrap] done (APIs enabled, data bucket ready, artifact registry ready). Later steps will be added by subsequent sub-tasks.
+EXIT=0
+
+--- AR-RELATED GCLOUD CALLS ACROSS BOTH RUNS ---
+gcloud artifacts repositories describe distillery --project=test-proj --location=us-central1 --format=value(name)
+gcloud artifacts repositories create distillery --project=test-proj --location=us-central1 --repository-format=docker --description=Distillery container images for the Cloud Run deployment
+gcloud artifacts repositories describe distillery --project=test-proj --location=us-central1 --format=value(name)
+
+Exactly ONE create call across two runs = idempotent.
+
+--- FOR OPERATOR VERIFICATION AFTER REAL DEPLOY ---
+$ gcloud artifacts repositories describe distillery \
+    --location=us-central1 \
+    --project=<project> \
+    --format='value(format,name)'
+Expected:
+  DOCKER
+  projects/<project>/locations/us-central1/repositories/distillery
