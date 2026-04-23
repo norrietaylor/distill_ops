@@ -1,0 +1,9 @@
+Type: file
+Command: grep -E '### Google Cloud Run' README.md
+Expected: section exists
+Timestamp: 2026-04-23T15:48:21Z
+
+Output:
+### Google Cloud Run (`gcp/`)
+
+Status: PASS

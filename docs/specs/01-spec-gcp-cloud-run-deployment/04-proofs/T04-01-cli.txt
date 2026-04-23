@@ -1,0 +1,21 @@
+Type: cli (manual)
+Command: With DISTILLERY_GCP_URL set, gh workflow run scheduler.yml -f operation=poll
+Expected: success; logs show POST to GCP /api/poll returning 200
+Timestamp: 2026-04-21T00:00:00Z
+Capture: manual (live GCP environment not available in this context)
+
+Status: SKIPPED
+
+Rationale:
+  This proof requires a running GCP Cloud Run service and GitHub repo variables
+  (DISTILLERY_URL + DISTILLERY_GCP_URL) configured in the norrietaylor/distill_ops
+  repo. The scheduler.yml matrix strategy was implemented and validated structurally
+  (YAML parsing, grep checks). A live end-to-end run can be triggered by the operator
+  after deploying to GCP using gcp-deploy.yml.
+
+Implementation notes:
+  - scheduler.yml now reads vars.DISTILLERY_GCP_URL for each job (poll, rescore, maintenance)
+  - When set, the matrix includes a gcp target running in parallel with the fly target
+  - Each step is gated: `if: ${{ matrix.enabled && matrix.url != '' }}`
+  - Per-target status lines (fly: ok, gcp: ok|failed) are emitted to GITHUB_STEP_SUMMARY
+  - When DISTILLERY_GCP_URL is unset/empty, the gcp matrix row is skipped entirely
