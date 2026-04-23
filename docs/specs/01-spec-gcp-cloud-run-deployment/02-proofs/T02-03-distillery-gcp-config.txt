@@ -1,0 +1,33 @@
+Type: file
+Command: python3 -c "import yaml; c=yaml.safe_load(open('gcp/distillery-gcp.yaml')); ..."
+Expected: storage + embedding + auth + webhooks all configured per R02.2
+Timestamp: 2026-04-21T00:00:00Z
+Status: PASS
+
+Covers requirement R02.2 (distillery-gcp.yaml: DuckDB at /data/distillery.db,
+Jina embeddings, GitHub OAuth env refs, webhooks enabled).
+
+---------- Loaded config values ----------
+storage.backend                 = duckdb
+storage.database_path           = /data/distillery.db
+embedding.provider              = jina
+embedding.model                 = jina-embeddings-v3
+embedding.api_key_env           = JINA_API_KEY
+server.auth.provider            = github
+server.auth.client_id_env       = GITHUB_CLIENT_ID
+server.auth.client_secret_env   = GITHUB_CLIENT_SECRET
+server.webhooks.enabled         = True
+server.webhooks.secret_env      = DISTILLERY_WEBHOOK_SECRET
+
+---------- R02.2 checklist ----------
+[PASS] storage.backend == 'duckdb'
+[PASS] storage.database_path == '/data/distillery.db'   (GCS FUSE mount)
+[PASS] embedding.provider == 'jina' with api_key_env == 'JINA_API_KEY'
+[PASS] server.auth.provider == 'github' with client_id_env + client_secret_env refs
+[PASS] server.webhooks.enabled == true with secret_env == 'DISTILLERY_WEBHOOK_SECRET'
+
+---------- Parity with fly/distillery-fly.yaml ----------
+The same shape is used by the existing Fly deployment config (storage/embedding/
+server.auth/server.webhooks sections), so no new config schema was introduced.
+The only GCP-specific values are the storage path (/data/distillery.db instead
+of the Fly volume path) and the webhook/base-URL env names routed to Secret Manager.

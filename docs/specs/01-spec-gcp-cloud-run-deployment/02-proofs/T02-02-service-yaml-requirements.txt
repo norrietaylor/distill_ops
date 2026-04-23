@@ -1,0 +1,71 @@
+Type: file
+Command: python3 -c "import yaml; svc=yaml.safe_load(open('gcp/service.yaml')); ..." (structured assertion dump)
+Expected: every field in the R02.3..R02.8 checklist matches the spec
+Timestamp: 2026-04-21T00:00:00Z
+Status: PASS
+
+Covers requirements R02.3, R02.4, R02.5, R02.6, R02.7 (structural attributes of service.yaml).
+
+---------- Structured dump of spec.template ----------
+Annotations:
+  run.googleapis.com/max-instances  = '1'
+  run.googleapis.com/min-instances  = '0'
+  run.googleapis.com/cpu-throttling = 'false'
+
+Template spec:
+  serviceAccountName    = 'distillery-run'
+  timeoutSeconds        = 300
+  containerConcurrency  = 10
+  executionEnvironment  = 'gen2'
+
+Container:
+  name                  = 'distillery'
+  containerPort         = 8000
+  resources.limits      = {'cpu': '2', 'memory': '1024Mi'}
+  startupProbe.path     = '/.well-known/oauth-authorization-server'
+  volumeMounts          = ['data:/data']
+  secret env vars       = ['DISTILLERY_BASE_URL', 'JINA_API_KEY',
+                            'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET',
+                            'DISTILLERY_WEBHOOK_SECRET']
+
+Volume:
+  name='data'
+  csi.driver='gcsfuse.run.googleapis.com'
+  bucket='{{PROJECT_ID}}-distillery-data'
+  readOnly=False
+
+---------- Requirement matrix ----------
+[PASS] R02.3  max-instances == 1                          -> '1'
+[PASS] R02.3  min-instances == 0                          -> '0'
+[PASS] R02.3  containerPort == 8000                       -> 8000
+[PASS] R02.3  GCS FUSE volume `data` at /data bound to
+              <project>-distillery-data bucket            -> driver=gcsfuse.run.googleapis.com
+                                                             bucket={{PROJECT_ID}}-distillery-data
+[PASS] R02.3  Runtime SA == distillery-run                -> 'distillery-run'
+[PASS] R02.3  Secret Manager refs for the 5 required
+              secrets (JINA_API_KEY, GITHUB_CLIENT_ID,
+              GITHUB_CLIENT_SECRET, DISTILLERY_WEBHOOK_SECRET,
+              DISTILLERY_BASE_URL)                        -> 5/5 present, all via secretKeyRef
+[PASS] R02.3  startupProbe against
+              /.well-known/oauth-authorization-server     -> present (also livenessProbe)
+
+[PASS] R02.4  executionEnvironment == gen2                -> 'gen2' (required for GCS FUSE)
+
+[PASS] R02.5  Cloud Run request timeout >= 300s           -> timeoutSeconds=300
+
+[PASS] R02.6  Memory limit >= 1024MB                      -> memory='1024Mi'
+
+[PASS] R02.7  containerConcurrency == 10                  -> 10 (matches Fly hard_limit)
+
+---------- Grep-form proof (matches metadata.proof_artifacts #5) ----------
+$ grep -E 'executionEnvironment: gen2' gcp/service.yaml
+      executionEnvironment: gen2
+$ grep 'csi: gcsfuse.run.googleapis.com' gcp/service.yaml
+# (no match -- key is spelled `driver:` under `csi:`; equivalent check below)
+$ grep 'driver: gcsfuse.run.googleapis.com' gcp/service.yaml
+          driver: gcsfuse.run.googleapis.com
+
+Note: The metadata.proof_artifacts entry read "csi: gcsfuse..." but the CSI
+driver id in Knative/Cloud Run YAML lives on the `driver:` line nested under
+`csi:`, not on the `csi:` line itself. The check above confirms the same
+invariant against the correct YAML path.

@@ -1,0 +1,58 @@
+Type: file
+Command: python3 parse-and-cross-reference gcp/service.yaml
+Expected: service.yaml is a valid Knative Service, and every external ref
+          resolves to an asset provisioned by gcp/bootstrap.sh (T01) or to
+          operator-managed Secret Manager entries -- i.e. deployable with
+          only files under gcp/ plus one `gcloud run services replace`.
+Timestamp: 2026-04-21T00:00:00Z
+Status: PASS
+
+Covers requirement R02.8 (service is deployable with gcp/ files + one
+`gcloud run services replace gcp/service.yaml --region=...`).
+
+---------- gcp/ contents ----------
+gcp/Dockerfile
+gcp/bootstrap.sh              (delivered by T01, prerequisite)
+gcp/distillery-gcp.yaml
+gcp/service.yaml
+
+---------- Knative Service shape ----------
+apiVersion:          serving.knative.dev/v1    OK
+kind:                Service                    OK
+metadata.name:       distillery                 OK
+image (templated):   us-central1-docker.pkg.dev/PROJECT_ID/distillery/distillery:latest
+                     (the CI deploy workflow substitutes PROJECT_ID / TAG before `replace`)
+
+---------- Cross-reference chain ----------
+Every external reference in service.yaml resolves to either:
+  (a) an asset provisioned by gcp/bootstrap.sh (Task T01 deliverable), OR
+  (b) a Secret Manager entry created once by the operator per deploy target
+
+Reference                           | Provenance
+------------------------------------|------------------------------------------------
+distillery-run (serviceAccount)     | bootstrap.sh -> gcloud iam service-accounts create
+{{PROJECT_ID}}-distillery-data      | bootstrap.sh -> gcloud storage buckets create
+distillery/distillery (AR repo)     | bootstrap.sh -> gcloud artifacts repositories create
+JINA_API_KEY                        | operator: gcloud secrets create JINA_API_KEY
+GITHUB_CLIENT_ID                    | operator: gcloud secrets create GITHUB_CLIENT_ID
+GITHUB_CLIENT_SECRET                | operator: gcloud secrets create GITHUB_CLIENT_SECRET
+DISTILLERY_WEBHOOK_SECRET           | operator: gcloud secrets create DISTILLERY_WEBHOOK_SECRET
+DISTILLERY_BASE_URL                 | operator: gcloud secrets create DISTILLERY_BASE_URL
+
+---------- Deployability checklist ----------
+[PASS] No references to files outside the gcp/ directory (aside from the
+       substituted image reference supplied by the CI workflow)
+[PASS] Valid Knative Service manifest (apiVersion/kind/metadata/spec present)
+[PASS] `gcloud run services replace gcp/service.yaml --region=<region>` is the
+       only API call the operator needs (after bootstrap + secrets are in place)
+
+---------- Remaining live-environment proofs (manual) ----------
+Four proof_artifacts in the task metadata require a live GCP project or
+service URL and cannot be executed from the worktree:
+  - `gcloud run services replace gcp/service.yaml --region=us-central1`
+  - `curl https://<service-url>/.well-known/oauth-authorization-server`
+  - `curl -X POST https://<service-url>/mcp -H ... -d '{"method":"tools/list"}'`
+  - Force a revision redeploy and exec `ls /data/distillery.db` in-container
+These will be exercised by the T03 deploy workflow proof (revision Ready=True)
+and by T04 / smoke tests once the service has been deployed to the staging
+project. See T02-proofs.md for the mapping.
