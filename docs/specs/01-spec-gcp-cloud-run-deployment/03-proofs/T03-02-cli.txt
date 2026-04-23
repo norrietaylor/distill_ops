@@ -1,0 +1,13 @@
+Type: cli
+Command: gh run view <run-id> --log
+Expected: auth step shows OIDC token exchange, no key file
+Timestamp: 2026-04-21T00:00:00Z
+Capture: manual
+Status: SKIPPED
+
+Rationale:
+This proof depends on a live GitHub Actions run (T03-01). Since T03-01 was not
+executed against a real GCP environment, there is no run-id to query. The workflow
+is structured so the google-github-actions/auth step uses workload_identity_provider
+and service_account exclusively — no credentials file or JSON key path is present.
+The auth step will emit OIDC token exchange details in the run log when run live.
