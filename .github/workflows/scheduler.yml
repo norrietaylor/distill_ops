@@ -20,27 +20,40 @@ on:
 
 jobs:
   poll:
-    name: Poll Feed Sources
+    name: Poll Feed Sources (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'poll' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '23 * * * *'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: fly
+            url: ${{ vars.DISTILLERY_URL }}
+            enabled: true
+          - target: gcp
+            url: ${{ vars.DISTILLERY_GCP_URL }}
+            enabled: ${{ vars.DISTILLERY_GCP_URL != '' }}
     steps:
-      - name: Warm Fly machine
-        env:
-          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+      - name: Skip if target disabled
+        if: ${{ !matrix.enabled || matrix.url == '' }}
         run: |
-          # Wake the suspended Fly machine with a cheap GET and wait until
+          echo "Target ${{ matrix.target }} is not configured — skipping"
+      - name: Warm ${{ matrix.target }} instance
+        if: ${{ matrix.enabled && matrix.url != '' }}
+        env:
+          TARGET_URL: ${{ matrix.url }}
+        run: |
+          # Wake the suspended instance with a cheap GET and wait until
           # the app is actually ready before issuing the webhook POST.
-          # The request that triggers the cold start is the one most likely
-          # to 502 — so we front-load that cost here.
           deadline=$((SECONDS + 300))
           attempt=0
           until [ "$SECONDS" -ge "$deadline" ]; do
             attempt=$((attempt + 1))
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
-              "${DISTILLERY_URL}/.well-known/oauth-authorization-server" || echo "000")
+              "${TARGET_URL}/.well-known/oauth-authorization-server" || echo "000")
             if [ "$code" = "200" ]; then
               echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
               exit 0
@@ -50,44 +63,64 @@ jobs:
           done
           echo "::error::App did not become ready within 300s"
           exit 1
-      - name: Trigger poll webhook
+      - name: Trigger poll webhook (${{ matrix.target }})
+        if: ${{ matrix.enabled && matrix.url != '' }}
         env:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
-          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+          TARGET_URL: ${{ matrix.url }}
+          TARGET: ${{ matrix.target }}
         run: |
           http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
             --max-time 600 \
             --retry 3 --retry-delay 15 --retry-all-errors \
             -X POST \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
-            "${DISTILLERY_URL}/api/poll")
+            "${TARGET_URL}/api/poll")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
           if [ "$http_code" = "429" ]; then
-            echo "::warning::Endpoint in cooldown (429) — skipping"
+            echo "::warning::${TARGET} endpoint in cooldown (429) — skipping"
+            echo "${TARGET}: cooldown (429)" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           elif [ "$http_code" -ge 400 ]; then
-            echo "::error::Webhook returned HTTP ${http_code}"
+            echo "::error::${TARGET} webhook returned HTTP ${http_code}"
+            echo "${TARGET}: failed (HTTP ${http_code})" >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
+          echo "${TARGET}: ok" >> "${GITHUB_STEP_SUMMARY}"
 
   rescore:
-    name: Rescore Feed Entries
+    name: Rescore Feed Entries (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'rescore' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '17 6 * * *'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: fly
+            url: ${{ vars.DISTILLERY_URL }}
+            enabled: true
+          - target: gcp
+            url: ${{ vars.DISTILLERY_GCP_URL }}
+            enabled: ${{ vars.DISTILLERY_GCP_URL != '' }}
     steps:
-      - name: Warm Fly machine
+      - name: Skip if target disabled
+        if: ${{ !matrix.enabled || matrix.url == '' }}
+        run: |
+          echo "Target ${{ matrix.target }} is not configured — skipping"
+      - name: Warm ${{ matrix.target }} instance
+        if: ${{ matrix.enabled && matrix.url != '' }}
         env:
-          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+          TARGET_URL: ${{ matrix.url }}
         run: |
           deadline=$((SECONDS + 300))
           attempt=0
           until [ "$SECONDS" -ge "$deadline" ]; do
             attempt=$((attempt + 1))
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
-              "${DISTILLERY_URL}/.well-known/oauth-authorization-server" || echo "000")
+              "${TARGET_URL}/.well-known/oauth-authorization-server" || echo "000")
             if [ "$code" = "200" ]; then
               echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
               exit 0
@@ -97,44 +130,64 @@ jobs:
           done
           echo "::error::App did not become ready within 300s"
           exit 1
-      - name: Trigger rescore webhook
+      - name: Trigger rescore webhook (${{ matrix.target }})
+        if: ${{ matrix.enabled && matrix.url != '' }}
         env:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
-          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+          TARGET_URL: ${{ matrix.url }}
+          TARGET: ${{ matrix.target }}
         run: |
           http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
             --max-time 600 \
             --retry 3 --retry-delay 15 --retry-all-errors \
             -X POST \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
-            "${DISTILLERY_URL}/api/rescore")
+            "${TARGET_URL}/api/rescore")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
           if [ "$http_code" = "429" ]; then
-            echo "::warning::Endpoint in cooldown (429) — skipping"
+            echo "::warning::${TARGET} endpoint in cooldown (429) — skipping"
+            echo "${TARGET}: cooldown (429)" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           elif [ "$http_code" -ge 400 ]; then
-            echo "::error::Webhook returned HTTP ${http_code}"
+            echo "::error::${TARGET} webhook returned HTTP ${http_code}"
+            echo "${TARGET}: failed (HTTP ${http_code})" >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
+          echo "${TARGET}: ok" >> "${GITHUB_STEP_SUMMARY}"
 
   maintenance:
-    name: Weekly KB Maintenance
+    name: Weekly KB Maintenance (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'maintenance' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '41 7 * * 1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: fly
+            url: ${{ vars.DISTILLERY_URL }}
+            enabled: true
+          - target: gcp
+            url: ${{ vars.DISTILLERY_GCP_URL }}
+            enabled: ${{ vars.DISTILLERY_GCP_URL != '' }}
     steps:
-      - name: Warm Fly machine
+      - name: Skip if target disabled
+        if: ${{ !matrix.enabled || matrix.url == '' }}
+        run: |
+          echo "Target ${{ matrix.target }} is not configured — skipping"
+      - name: Warm ${{ matrix.target }} instance
+        if: ${{ matrix.enabled && matrix.url != '' }}
         env:
-          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+          TARGET_URL: ${{ matrix.url }}
         run: |
           deadline=$((SECONDS + 300))
           attempt=0
           until [ "$SECONDS" -ge "$deadline" ]; do
             attempt=$((attempt + 1))
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
-              "${DISTILLERY_URL}/.well-known/oauth-authorization-server" || echo "000")
+              "${TARGET_URL}/.well-known/oauth-authorization-server" || echo "000")
             if [ "$code" = "200" ]; then
               echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
               exit 0
@@ -144,22 +197,27 @@ jobs:
           done
           echo "::error::App did not become ready within 300s"
           exit 1
-      - name: Trigger maintenance webhook
+      - name: Trigger maintenance webhook (${{ matrix.target }})
+        if: ${{ matrix.enabled && matrix.url != '' }}
         env:
           DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
-          DISTILLERY_URL: ${{ vars.DISTILLERY_URL }}
+          TARGET_URL: ${{ matrix.url }}
+          TARGET: ${{ matrix.target }}
         run: |
           http_code=$(curl -sS -o /tmp/response.json -w '%{http_code}' \
             --max-time 600 \
             --retry 3 --retry-delay 15 --retry-all-errors \
             -X POST \
             -H "Authorization: Bearer ${DISTILLERY_WEBHOOK_SECRET}" \
-            "${DISTILLERY_URL}/api/maintenance")
+            "${TARGET_URL}/api/maintenance")
           cat /tmp/response.json >> "${GITHUB_STEP_SUMMARY}"
           if [ "$http_code" = "429" ]; then
-            echo "::warning::Endpoint in cooldown (429) — skipping"
+            echo "::warning::${TARGET} endpoint in cooldown (429) — skipping"
+            echo "${TARGET}: cooldown (429)" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           elif [ "$http_code" -ge 400 ]; then
-            echo "::error::Webhook returned HTTP ${http_code}"
+            echo "::error::${TARGET} webhook returned HTTP ${http_code}"
+            echo "${TARGET}: failed (HTTP ${http_code})" >> "${GITHUB_STEP_SUMMARY}"
             exit 1
           fi
+          echo "${TARGET}: ok" >> "${GITHUB_STEP_SUMMARY}"

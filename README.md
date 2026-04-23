@@ -19,6 +19,17 @@ flyctl deploy
 
 See [fly/README.md](fly/README.md) for full setup instructions.
 
+### Google Cloud Run (`gcp/`)
+
+Local DuckDB on a GCS FUSE volume with GitHub OAuth and scale-to-zero billing.
+
+```bash
+bash gcp/bootstrap.sh --project <gcp-project-id> --region us-central1 --repo <owner>/<repo>
+gh workflow run gcp-deploy.yml -f image_tag=latest -f region=us-central1
+```
+
+See [docs/gcp.md](docs/gcp.md) for full setup instructions.
+
 ### Prefect Horizon (`prefect/`)
 
 MotherDuck cloud DuckDB with GitHub OAuth.
@@ -35,7 +46,8 @@ See [prefect/README.md](prefect/README.md) for full setup instructions.
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | `fly-deploy.yml` | Manual dispatch | Deploy GHCR image to Fly.io |
-| `scheduler.yml` | Cron (hourly/daily/weekly) | Call webhook endpoints for feed polling, rescoring, maintenance |
+| `gcp-deploy.yml` | Manual dispatch | Build and deploy to GCP Cloud Run via Workload Identity Federation |
+| `scheduler.yml` | Cron (hourly/daily/weekly) | Call webhook endpoints for feed polling, rescoring, maintenance (targets Fly; also targets GCP when `DISTILLERY_GCP_URL` is set) |
 
 ## Image Source
 
@@ -52,5 +64,6 @@ Fly.io's `Dockerfile` extends this base image with Fly-specific config (volume o
 ## Documentation
 
 - [Fly.io Deployment Guide](docs/fly.md)
+- [Google Cloud Run Deployment Guide](docs/gcp.md)
 - [Prefect Horizon Guide](docs/prefect.md)
 - [Main Distillery Docs](https://norrietaylor.github.io/distillery/)

@@ -1,0 +1,162 @@
+name: Deploy to GCP Cloud Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Base image tag to build from (default: latest)"
+        required: false
+        default: "latest"
+      region:
+        description: "GCP region (default: us-central1)"
+        required: false
+        default: "us-central1"
+
+# Prevent overlapping deploys — only one deploy runs at a time.
+concurrency:
+  group: gcp-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write  # Required for Workload Identity Federation OIDC token
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    # NOTE: This workflow authenticates exclusively via Workload Identity Federation (WIF).
+    # Long-lived service-account JSON keys are NEVER used. There is no credentials file,
+    # no key export, and no OIDC bypass. The google-github-actions/auth step below will
+    # fail the job if WIF configuration is missing or invalid, providing a loud signal
+    # that key-based auth is not a fallback path. If a long-lived key is needed for some
+    # reason, a separate workflow must be created — it must not be added to this file.
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@6189d56e4096ee891640bb02ac264be376592d6a # v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          REGION="${{ github.event.inputs.region }}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push container image
+        id: build
+        run: |
+          REGION="${{ github.event.inputs.region }}"
+          PROJECT="${{ vars.GCP_PROJECT_ID }}"
+          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          GIT_SHA="${{ github.sha }}"
+
+          REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/distillery/distillery"
+
+          echo "Building ${REGISTRY}:${GIT_SHA}"
+
+          docker build \
+            --file gcp/Dockerfile \
+            --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+            --tag "${REGISTRY}:${GIT_SHA}" \
+            --tag "${REGISTRY}:latest" \
+            .
+
+          docker push "${REGISTRY}:${GIT_SHA}"
+          docker push "${REGISTRY}:latest"
+
+          echo "image=${REGISTRY}:${GIT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Substitute image reference in service manifest
+        id: manifest
+        run: |
+          REGION="${{ github.event.inputs.region }}"
+          PROJECT="${{ vars.GCP_PROJECT_ID }}"
+          GIT_SHA="${{ github.sha }}"
+
+          REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/distillery/distillery"
+          IMAGE="${REGISTRY}:${GIT_SHA}"
+
+          # Replace the placeholder image and PROJECT_ID in service.yaml.
+          # The braced form is substituted first so that if any future placeholder is
+          # introduced in the braced syntax it's handled; the bare PROJECT_ID
+          # substitution then covers the current manifest form.
+          sed \
+            -e "s|image: .*distillery/distillery:.*|image: ${IMAGE}|" \
+            -e "s|{{PROJECT_ID}}|${PROJECT}|g" \
+            -e "s|PROJECT_ID|${PROJECT}|g" \
+            gcp/service.yaml > /tmp/service-deploy.yaml
+
+          # Fail fast if any unresolved template tokens remain.
+          if grep -nE '\{\{|PROJECT_ID' /tmp/service-deploy.yaml; then
+            echo "::error::Unresolved template tokens in rendered manifest"
+            exit 1
+          fi
+
+          echo "Resolved manifest:"
+          grep -E 'image:|bucketName:' /tmp/service-deploy.yaml
+
+          echo "manifest=/tmp/service-deploy.yaml" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Cloud Run revision
+        id: deploy
+        run: |
+          REGION="${{ github.event.inputs.region }}"
+
+          gcloud run services replace "${{ steps.manifest.outputs.manifest }}" \
+            --region="${REGION}" \
+            --project="${{ vars.GCP_PROJECT_ID }}"
+
+          # Retrieve the service URL for the smoke check
+          SERVICE_URL=$(gcloud run services describe distillery \
+            --region="${REGION}" \
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            --format="value(status.url)")
+
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: ${SERVICE_URL}"
+
+      - name: Post-deploy smoke check
+        run: |
+          SERVICE_URL="${{ steps.deploy.outputs.service_url }}"
+          PROBE_URL="${SERVICE_URL}/.well-known/oauth-authorization-server"
+
+          echo "Smoke-checking ${PROBE_URL} (60 second timeout)..."
+
+          deadline=$((SECONDS + 60))
+          while true; do
+            if curl -sf --max-time 10 "${PROBE_URL}" > /dev/null; then
+              echo "Smoke check PASSED: ${PROBE_URL} returned 200"
+              break
+            fi
+            if [[ $SECONDS -ge $deadline ]]; then
+              echo "ERROR: Smoke check timed out after 60 seconds"
+              echo "URL: ${PROBE_URL}"
+              exit 1
+            fi
+            echo "Not ready yet, retrying in 5 seconds..."
+            sleep 5
+          done
+
+          # Surface result in job summary
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## GCP Cloud Run Deploy
+
+          | | |
+          |---|---|
+          | **Status** | PASSED |
+          | **Service URL** | ${SERVICE_URL} |
+          | **Smoke check** | ${PROBE_URL} — 200 OK |
+          | **Image** | ${{ steps.build.outputs.image }} |
+          | **Git SHA** | ${{ github.sha }} |
+          EOF
