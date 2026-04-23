@@ -10,7 +10,7 @@
 - **Implementation Ready**: Yes — all four demoable units landed; structural proofs pass for every FR; live GCP runtime proofs are appropriately deferred (worktree has no gcloud / no live project) and will be exercised by the CI workflow and T04 smoke on first real deploy.
 - **Requirements Verified**: 33/33 (100%) — 8 live-environment items (marked manual/deferred in task metadata) verified via code evidence.
 - **Proof Artifacts Working**: 22/22 accessible (100%); 14 auto-pass, 8 deferred-manual documented and consistent with spec's "no live GCP project" constraint.
-- **Files Changed vs Expected**: all 55 changed files are inside declared scope (gcp/, .github/workflows/gcp-deploy.yml, .github/workflows/scheduler.yml, docs/gcp.md, README.md, spec/proofs dir). No fly/ or fly-deploy.yml drift (verified via git diff).
+- **Files Changed vs Expected**: as of validation commit `eed6919`, all 55 changed files are inside declared scope (gcp/, .github/workflows/gcp-deploy.yml, .github/workflows/scheduler.yml, docs/gcp.md, README.md, spec/proofs dir). No fly/ or fly-deploy.yml drift (verified via git diff). Subsequent review-fixup commits are scoped to the same paths.
 
 ## Coverage Matrix: Functional Requirements
 
@@ -121,7 +121,7 @@
 - **Gate A — No CRITICAL or HIGH issues**: PASS. The highest severity issues are MEDIUM (deferred live-GCP proofs), all properly scoped out in task metadata.
 - **Gate B — No Unknown entries in coverage matrix**: PASS. All 33 FRs have status Verified; no Unknowns.
 - **Gate C — All proof artifacts accessible and functional**: PASS. 22/22 artifacts exist; 14 auto-verified (re-executed YAML parse, grep, docker-inspect-style checks, `bash -n`, `test -x`), 8 deferred-manual items have consistent code-level evidence.
-- **Gate D — Changed files in scope or justified**: PASS. 55 files changed; all within declared scope (gcp/, .github/workflows/{gcp-deploy,scheduler}.yml, docs/gcp.md, README.md, spec+proofs dir). fly/ and .github/workflows/fly-deploy.yml confirmed untouched.
+- **Gate D — Changed files in scope or justified**: PASS. As of validation commit `eed6919`, 55 files changed; all within declared scope (gcp/, .github/workflows/{gcp-deploy,scheduler}.yml, docs/gcp.md, README.md, spec+proofs dir). fly/ and .github/workflows/fly-deploy.yml confirmed untouched.
 - **Gate E — Repository standards followed**: PASS. Conventional commits, `set -euo pipefail`, mirrored dir layout, no hardcoded IDs.
 - **Gate F — No real credentials in proof artifacts**: PASS. Regex scan across docs/specs/01-spec-gcp-cloud-run-deployment/ for `AIza*`, `jina_*`, `ghp_*`, PEM markers, `Bearer <tok>` returned zero matches. The `secretKeyRef`s in service.yaml reference Secret Manager secret *names*, not values. Summary block's `GCP_WIF_PROVIDER` uses the literal placeholder `123456789012` as a synthetic project number.
 
@@ -152,7 +152,7 @@
 - Credential regex scan across proofs tree → 0 hits
 
 ### File Scope Check
-Declared scope: `gcp/*`, `.github/workflows/gcp-deploy.yml`, `.github/workflows/scheduler.yml`, `docs/gcp.md`, `README.md`, spec/proofs dir. Actual changes match exactly. No undeclared file changes.
+Declared scope: `gcp/*`, `.github/workflows/gcp-deploy.yml`, `.github/workflows/scheduler.yml`, `docs/gcp.md`, `README.md`, spec/proofs dir. Actual changes (as of commit `eed6919`) match exactly. No undeclared file changes.
 
 ---
 Validation performed by: Claude Opus 4.7 (1M context)

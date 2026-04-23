@@ -19,7 +19,7 @@
 |-----|-------------|--------|
 | R04.1 | scheduler.yml reads DISTILLERY_GCP_URL and fires webhooks in parallel matrix | PASS |
 | R04.2 | When DISTILLERY_GCP_URL unset/empty, behavior identical to current Fly-only flow | PASS |
-| R04.3 | Job summary emits per-target status lines (fly: ok, gcp: ok|failed) | PASS |
+| R04.3 | Job summary emits per-target status lines (`ok`, `failed (HTTP N)`, `cooldown (429)`, or `skipped` when the target is disabled) | PASS |
 | R04.4 | docs/gcp.md exists with all required sections | PASS |
 | R04.5 | Architecture table documents max_instances=1 constraint and reason | PASS |
 | R04.6 | README.md contains Google Cloud Run subsection | PASS |
@@ -38,7 +38,7 @@ Key properties:
 - `fail-fast: false` so a GCP failure does not cancel the Fly run
 - Steps gated on `if: ${{ matrix.enabled && matrix.url != '' }}`
 - A "Skip if target disabled" step runs first when `enabled=false`, producing a clear log line
-- Status summary written to `GITHUB_STEP_SUMMARY` after each webhook call: `<target>: ok` or `<target>: failed (HTTP N)`
+- Status summary written to `GITHUB_STEP_SUMMARY` after each webhook call: `<target>: ok`, `<target>: failed (HTTP N)`, or `<target>: cooldown (429)`; disabled targets are explicitly skipped and emit `<target>: skipped`
 
 ### docs/gcp.md
 

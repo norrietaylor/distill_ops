@@ -44,9 +44,9 @@ Feature: Cloud Run Service Definition
 
   Scenario: Service manifest declares gen2 execution environment and GCS FUSE volume
     Given the repository checked out at the feature branch
-    When an operator runs "grep -E 'executionEnvironment: gen2' gcp/service.yaml"
+    When an operator runs "grep -E 'run.googleapis.com/execution-environment: gen2' gcp/service.yaml"
     Then the command exits with code 0
-    And "grep -E 'csi: gcsfuse.run.googleapis.com' gcp/service.yaml" exits with code 0
+    And "grep -E 'driver: gcsfuse.run.googleapis.com' gcp/service.yaml" exits with code 0
     And "grep -E 'mountPath: /data' gcp/service.yaml" exits with code 0
 
   Scenario: Service manifest requests at least 1024MB memory and containerConcurrency=10

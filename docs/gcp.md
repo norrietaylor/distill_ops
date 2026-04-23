@@ -166,7 +166,12 @@ SERVICE_URL=$(gcloud run services describe distillery \
 # Set the GitHub repo variable (Fly remains the primary target)
 gh variable set DISTILLERY_GCP_URL --body "${SERVICE_URL}"
 
-# The webhook secret must match what you stored in Secret Manager
+# The webhook secret must match what you stored in Secret Manager.
+# If $SECRET is not in your current shell (e.g. you're in a new session),
+# retrieve it from Secret Manager first:
+#   SECRET=$(gcloud secrets versions access latest \
+#     --secret=DISTILLERY_WEBHOOK_SECRET \
+#     --project=<gcp-project-id>)
 gh secret set DISTILLERY_WEBHOOK_SECRET --body "$SECRET"
 ```
 

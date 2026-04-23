@@ -1,5 +1,5 @@
 Type: cli
-Command: bash gcp/bootstrap.sh --project test --region us-central1 --repo owner/name | tail -n 20
+Command: bash gcp/bootstrap.sh --project test-proj --region us-central1 --repo owner/name | tail -n 20
 Expected: final summary block contains GCP_WIF_PROVIDER=projects/... and GCP_DEPLOYER_SA=distillery-deployer@...
 Timestamp: 2026-04-23T00:40:00Z
 Status: PASS

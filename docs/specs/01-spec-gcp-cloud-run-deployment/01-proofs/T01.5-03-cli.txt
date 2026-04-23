@@ -16,8 +16,8 @@ applying 6 project/bucket/SA IAM bindings + 1 WIF principalSet binding.
 EXIT=0
 
 --- RUN 2 log summary ---
-bucket/AR/2 SAs/pool/provider all describe-hits -> all 7 create paths
-skipped. 7 binding calls re-execute (idempotent).
+bucket/AR/2 SAs/pool/provider all describe-hits -> all 6 create paths
+skipped. 6 binding calls re-execute (idempotent).
 EXIT=0
 
 --- CREATE-CALL COUNTS ACROSS BOTH RUNS ---

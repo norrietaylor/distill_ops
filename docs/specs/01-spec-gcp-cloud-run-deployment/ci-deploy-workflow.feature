@@ -47,7 +47,7 @@ Feature: CI Deploy Workflow
   Scenario: Concurrent deploy runs do not overlap
     Given one gcp-deploy run is already in progress
     When a maintainer triggers a second "gh workflow run gcp-deploy.yml -f image_tag=latest"
-    Then the second run is queued or cancelled by the "gcp-deploy" concurrency group
+    Then the second run is queued by the "gcp-deploy" concurrency group (cancel-in-progress is false)
     And only one run at a time reaches the "gcloud run services replace" step
 
   Scenario: Workflow does not mutate Fly deploy state

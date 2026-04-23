@@ -6,7 +6,7 @@ Feature: Scheduler Integration and Documentation
 
   Scenario: Scheduler fires /api/poll against GCP when DISTILLERY_GCP_URL is set
     Given repo variable DISTILLERY_GCP_URL is set to a live Cloud Run service URL $GCP_URL
-    And repo variable DISTILLERY_FLY_URL is set to the existing Fly URL $FLY_URL
+    And repo variable DISTILLERY_URL is set to the existing Fly URL $FLY_URL
     When a maintainer runs "gh workflow run scheduler.yml -f job=poll"
     And waits for the resulting run to complete
     Then "gh run view <run-id> --json conclusion --jq .conclusion" prints "success"
@@ -15,7 +15,7 @@ Feature: Scheduler Integration and Documentation
 
   Scenario: Scheduler behavior is unchanged when DISTILLERY_GCP_URL is unset
     Given repo variable DISTILLERY_GCP_URL is unset or empty
-    And repo variable DISTILLERY_FLY_URL is set to $FLY_URL
+    And repo variable DISTILLERY_URL is set to $FLY_URL
     When a maintainer runs "gh workflow run scheduler.yml -f job=poll"
     And the resulting run completes
     Then the run logs include a POST to "$FLY_URL/api/poll"
@@ -23,7 +23,7 @@ Feature: Scheduler Integration and Documentation
     And no job summary line references GCP
 
   Scenario: Job summary emits per-target status lines
-    Given both DISTILLERY_FLY_URL and DISTILLERY_GCP_URL are set
+    Given both DISTILLERY_URL and DISTILLERY_GCP_URL are set
     When the scheduler run completes
     And a maintainer runs "gh run view <run-id> --json jobs --jq '.jobs[].summary'"
     Then the summary output contains a line matching "fly: ok" or "fly: failed"
@@ -31,7 +31,7 @@ Feature: Scheduler Integration and Documentation
 
   Scenario: GCP failure does not mask Fly success in the overall run
     Given DISTILLERY_GCP_URL points to a URL that returns HTTP 500 for /api/poll
-    And DISTILLERY_FLY_URL points to a healthy Fly service
+    And DISTILLERY_URL points to a healthy Fly service
     When the scheduler workflow runs
     Then the run reports the Fly target status as "ok"
     And the run reports the GCP target status as "failed"

@@ -87,11 +87,21 @@ jobs:
           REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/distillery/distillery"
           IMAGE="${REGISTRY}:${GIT_SHA}"
 
-          # Replace the placeholder image and PROJECT_ID in service.yaml
+          # Replace the placeholder image and PROJECT_ID in service.yaml.
+          # The braced form is substituted first so that if any future placeholder is
+          # introduced in the braced syntax it's handled; the bare PROJECT_ID
+          # substitution then covers the current manifest form.
           sed \
             -e "s|image: .*distillery/distillery:.*|image: ${IMAGE}|" \
+            -e "s|{{PROJECT_ID}}|${PROJECT}|g" \
             -e "s|PROJECT_ID|${PROJECT}|g" \
             gcp/service.yaml > /tmp/service-deploy.yaml
+
+          # Fail fast if any unresolved template tokens remain.
+          if grep -nE '\{\{|PROJECT_ID' /tmp/service-deploy.yaml; then
+            echo "::error::Unresolved template tokens in rendered manifest"
+            exit 1
+          fi
 
           echo "Resolved manifest:"
           grep -E 'image:|bucketName:' /tmp/service-deploy.yaml
