@@ -1,0 +1,23 @@
+Type: file
+Description: Dockerfile syntax and structure validation
+Expected: Dockerfile exists, is readable, contains required ENV vars (DISTILLERY_CONFIG, FASTMCP_HOME)
+Timestamp: 2026-04-21T22:45:00Z
+Status: PASS
+
+File: gcp/Dockerfile
+Location: /home/norrie.guest/code/distill_ops/.worktrees/feature-gcp-cloud-run-deployment/gcp/Dockerfile
+
+Verification:
+1. File exists: ✓
+2. File is executable-safe (not executable, as expected for Dockerfile): ✓
+3. Contains required ENV variables:
+   - FASTMCP_HOME=/data/fastmcp: ✓
+   - DISTILLERY_CONFIG=/app/distillery-gcp.yaml: ✓
+4. Extends from base image: ghcr.io/norrietaylor/distillery:${IMAGE_TAG} ✓
+5. Copies distillery-gcp.yaml from gcp/: ✓
+6. Fixes /data ownership at runtime: chown -R appuser:appuser /data ✓
+7. Drops privileges before running application: su -s /bin/sh appuser ✓
+8. Exposes port 8000: ✓
+
+Docker build syntax: VALID
+(Full build test deferred to integration environment where base image is available)

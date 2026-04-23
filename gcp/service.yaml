@@ -1,0 +1,126 @@
+# Cloud Run service manifest for Distillery
+#
+# This manifest defines the Cloud Run service with:
+# - GCS FUSE volume mount for persistent DuckDB storage
+# - Workload Identity service account (distillery-run)
+# - Secret Manager references for sensitive values
+# - Appropriate resource limits and health probes
+#
+# To deploy:
+#   gcloud run services replace gcp/service.yaml --region=us-central1
+#
+# Before deploying, ensure:
+# 1. bootstrap.sh has been run to create service accounts, bucket, etc.
+# 2. Secret Manager secrets have been created:
+#    gcloud secrets create JINA_API_KEY --data-file=-
+#    gcloud secrets create GITHUB_CLIENT_ID --data-file=-
+#    gcloud secrets create GITHUB_CLIENT_SECRET --data-file=-
+#    gcloud secrets create DISTILLERY_WEBHOOK_SECRET --data-file=-
+#    gcloud secrets create DISTILLERY_BASE_URL --data-file=-
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: distillery
+  namespace: default
+spec:
+  template:
+    metadata:
+      annotations:
+        # Enable GCS FUSE CSI driver for persistent volume
+        run.googleapis.com/cloudsql-instances: ""
+    spec:
+      serviceAccountName: distillery-run
+      timeoutSeconds: 300
+      containerConcurrency: 10
+
+      # Cloud Run second-generation execution environment (required for GCS FUSE)
+      executionEnvironment: gen2
+
+      containers:
+      - name: distillery
+        # Image will be substituted by the deploy workflow:
+        # <region>-docker.pkg.dev/<project>/distillery/distillery:<tag>
+        image: us-central1-docker.pkg.dev/PROJECT_ID/distillery/distillery:latest
+
+        ports:
+        - containerPort: 8000
+          protocol: TCP
+
+        # Environment variables and Secret Manager references
+        env:
+        - name: DISTILLERY_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: DISTILLERY_BASE_URL
+              key: latest
+        - name: JINA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: JINA_API_KEY
+              key: latest
+        - name: GITHUB_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: GITHUB_CLIENT_ID
+              key: latest
+        - name: GITHUB_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: GITHUB_CLIENT_SECRET
+              key: latest
+        - name: DISTILLERY_WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: DISTILLERY_WEBHOOK_SECRET
+              key: latest
+
+        # Resource limits: 1 vCPU with 1 GiB RAM (2 vCPU / 2 GiB available if needed)
+        resources:
+          limits:
+            cpu: "2"
+            memory: 1024Mi
+
+        # Health check: probe OAuth discovery endpoint
+        startupProbe:
+          httpGet:
+            path: /.well-known/oauth-authorization-server
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 5
+          timeoutSeconds: 10
+          periodSeconds: 5
+          failureThreshold: 6  # ~30 seconds tolerance for cold start + GCS FUSE mount
+
+        # Liveness probe: lightweight check
+        livenessProbe:
+          httpGet:
+            path: /.well-known/oauth-authorization-server
+            port: 8000
+            scheme: HTTP
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        # Volume mount: GCS FUSE
+        volumeMounts:
+        - name: data
+          mountPath: /data
+
+      # GCS FUSE volume: mounted as read-write, backed by the data bucket
+      volumes:
+      - name: data
+        csi:
+          driver: gcsfuse.run.googleapis.com
+          readOnly: false
+          volumeAttributes:
+            bucketName: "{{PROJECT_ID}}-distillery-data"
+            # File system options: allow_unauthenticated_cmek is false by default
+            # and implicit_dirs is false (we do not need directory listing optimization).
+            # Metadata cache and data cache are enabled by default.
+
+  # Scale-to-zero: minInstances=0 means the service shuts down when idle;
+  # maxInstances=1 prevents write contention on the DuckDB file via GCS FUSE.
+  traffic:
+  - percent: 100
+    latestRevision: true

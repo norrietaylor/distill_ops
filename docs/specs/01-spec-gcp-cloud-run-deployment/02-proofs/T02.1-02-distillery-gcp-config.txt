@@ -1,0 +1,28 @@
+Type: file
+Description: Distillery configuration for Cloud Run
+Expected: Config file exists, is valid YAML, contains required keys: storage.backend=duckdb, embedding.api_key_env=JINA_API_KEY, server.auth with GitHub, webhooks.enabled=true
+Timestamp: 2026-04-21T22:45:00Z
+Status: PASS
+
+File: gcp/distillery-gcp.yaml
+Location: /home/norrie.guest/code/distill_ops/.worktrees/feature-gcp-cloud-run-deployment/gcp/distillery-gcp.yaml
+
+Verification:
+1. File exists: ✓
+2. YAML validation: VALID
+3. Key configuration values:
+   - storage.backend: duckdb ✓
+   - storage.database_path: /data/distillery.db ✓
+   - embedding.provider: jina ✓
+   - embedding.api_key_env: JINA_API_KEY ✓
+   - server.auth.provider: github ✓
+   - server.auth.client_id_env: GITHUB_CLIENT_ID ✓
+   - server.auth.client_secret_env: GITHUB_CLIENT_SECRET ✓
+   - server.webhooks.enabled: true ✓
+   - server.webhooks.secret_env: DISTILLERY_WEBHOOK_SECRET ✓
+4. Rate limits configured (embedding_budget_daily: 500, max_db_size_mb: 900) ✓
+5. Comments document required Secret Manager secrets: ✓
+
+Configuration: VALID
+Parity with fly/distillery-fly.yaml: CONFIRMED
+Differences documented for Cloud Run (Secret Manager vs Fly secrets): CONFIRMED
