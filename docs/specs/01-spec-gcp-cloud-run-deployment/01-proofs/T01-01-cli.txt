@@ -1,0 +1,75 @@
+Type: cli
+Command: bash gcp/bootstrap.sh --project test-proj --region us-central1 --repo norrietaylor/distill_ops
+Expected: exit 0 on a fresh project
+Timestamp: 2026-04-21T14:49:42Z
+Status: PASS (structural — verified via gcloud stub)
+
+Parent-level end-to-end proof for T01. The bootstrap script runs to
+completion against a fresh (stub-tracked) project, creating every
+resource the spec requires and emitting the final summary block.
+
+--- FULL RUN 1 STDERR (bootstrap logs) + STDOUT (summary) ---
+
+[bootstrap] project=test-proj region=us-central1 repo=norrietaylor/distill_ops
+[bootstrap] enabling APIs on project=test-proj
+[bootstrap] creating bucket gs://test-proj-distillery-data in us-central1
+[bootstrap] creating artifact registry repo distillery (docker) in us-central1
+[bootstrap] creating service account distillery-run@test-proj.iam.gserviceaccount.com
+[bootstrap] creating service account distillery-deployer@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/storage.objectAdmin on gs://test-proj-distillery-data -> distillery-run@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/secretmanager.secretAccessor (project) -> distillery-run@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/run.admin (project) -> distillery-deployer@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/artifactregistry.writer (project) -> distillery-deployer@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/iam.serviceAccountUser on distillery-run@test-proj.iam.gserviceaccount.com -> distillery-deployer@test-proj.iam.gserviceaccount.com
+[bootstrap] creating workload identity pool distillery-deploy
+[bootstrap] creating WIF OIDC provider github bound to repo=norrietaylor/distill_ops
+[bootstrap] binding roles/iam.workloadIdentityUser on distillery-deployer@test-proj.iam.gserviceaccount.com -> WIF principalSet for repo=norrietaylor/distill_ops
+[bootstrap] bootstrap complete
+
+================= BOOTSTRAP SUMMARY =================
+Set these as GitHub Actions repository variables
+(Settings -> Secrets and variables -> Actions -> Variables):
+
+  GCP_PROJECT_ID=test-proj
+  GCP_DEPLOYER_SA=distillery-deployer@test-proj.iam.gserviceaccount.com
+  GCP_WIF_PROVIDER=projects/123456789012/locations/global/workloadIdentityPools/distillery-deploy/providers/github
+
+The deploy workflow (.github/workflows/gcp-deploy.yml) reads these
+three variables and exchanges a GitHub OIDC token for a short-lived
+access token — no service-account JSON key is ever issued.
+=====================================================
+
+EXIT=0
+
+--- CALL COUNTS (from gcloud stub log, RUN 1) ---
+
+  services enable               : 1
+  describe calls (total)        : 8
+    - 6 resource existence checks (bucket, AR repo, 2 SAs, WIF pool, WIF provider)
+    - 2 projects describe (bind_wif_principal + print_summary for projectNumber)
+  create calls (total)          : 6
+    - bucket (gs://test-proj-distillery-data)
+    - artifact registry repo (distillery)
+    - service account (distillery-run)
+    - service account (distillery-deployer)
+    - WIF pool (distillery-deploy)
+    - WIF provider (github via create-oidc)
+  add-iam-policy-binding calls  : 6
+    - bucket: storage.objectAdmin -> distillery-run
+    - project: secretmanager.secretAccessor -> distillery-run
+    - project: run.admin -> distillery-deployer
+    - project: artifactregistry.writer -> distillery-deployer
+    - SA-scoped: iam.serviceAccountUser on distillery-run -> distillery-deployer
+    - SA-scoped: iam.workloadIdentityUser on distillery-deployer -> WIF principalSet
+
+Create-call count (6) matches the 6 unique resources the spec enumerates.
+
+--- OPERATOR VERIFICATION (real gcloud, post-deploy) ---
+
+On an actual GCP project with gcloud installed, run:
+
+  bash gcp/bootstrap.sh --project <real-id> --region us-central1 --repo norrietaylor/distill_ops
+
+and confirm each of the six `create` log lines appears exactly once on
+first run, then the corresponding `already exists -- skipping` lines
+appear on all subsequent runs (see T01-02-cli.txt).

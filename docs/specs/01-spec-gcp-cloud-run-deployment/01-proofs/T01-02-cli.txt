@@ -1,0 +1,68 @@
+Type: cli
+Command: bash gcp/bootstrap.sh --project test-proj --region us-central1 --repo norrietaylor/distill_ops (second run)
+Expected: exit 0 (idempotence); no new resources created
+Timestamp: 2026-04-21T14:49:42Z
+Status: PASS (structural — verified via gcloud stub)
+
+Re-run immediately after T01-01-cli.txt's successful run, against the
+same stub-tracked state. Every describe now returns "exists" and every
+create path is skipped. The only non-idempotent-looking calls are the
+six `add-iam-policy-binding` bindings, which gcloud itself treats as
+idempotent at the policy-document level (re-adding the same member+role
+leaves the policy unchanged).
+
+--- FULL RUN 2 STDERR (bootstrap logs) + STDOUT (summary) ---
+
+[bootstrap] project=test-proj region=us-central1 repo=norrietaylor/distill_ops
+[bootstrap] enabling APIs on project=test-proj
+[bootstrap] bucket gs://test-proj-distillery-data already exists -- skipping
+[bootstrap] artifact registry repo distillery already exists in us-central1 -- skipping
+[bootstrap] service account distillery-run@test-proj.iam.gserviceaccount.com already exists -- skipping
+[bootstrap] service account distillery-deployer@test-proj.iam.gserviceaccount.com already exists -- skipping
+[bootstrap] binding roles/storage.objectAdmin on gs://test-proj-distillery-data -> distillery-run@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/secretmanager.secretAccessor (project) -> distillery-run@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/run.admin (project) -> distillery-deployer@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/artifactregistry.writer (project) -> distillery-deployer@test-proj.iam.gserviceaccount.com
+[bootstrap] binding roles/iam.serviceAccountUser on distillery-run@test-proj.iam.gserviceaccount.com -> distillery-deployer@test-proj.iam.gserviceaccount.com
+[bootstrap] workload identity pool distillery-deploy already exists -- skipping
+[bootstrap] WIF provider github already exists in pool distillery-deploy -- skipping
+[bootstrap] binding roles/iam.workloadIdentityUser on distillery-deployer@test-proj.iam.gserviceaccount.com -> WIF principalSet for repo=norrietaylor/distill_ops
+[bootstrap] bootstrap complete
+
+================= BOOTSTRAP SUMMARY =================
+Set these as GitHub Actions repository variables
+(Settings -> Secrets and variables -> Actions -> Variables):
+
+  GCP_PROJECT_ID=test-proj
+  GCP_DEPLOYER_SA=distillery-deployer@test-proj.iam.gserviceaccount.com
+  GCP_WIF_PROVIDER=projects/123456789012/locations/global/workloadIdentityPools/distillery-deploy/providers/github
+
+The deploy workflow (.github/workflows/gcp-deploy.yml) reads these
+three variables and exchanges a GitHub OIDC token for a short-lived
+access token -- no service-account JSON key is ever issued.
+=====================================================
+
+EXIT=0
+
+--- CALL COUNTS (from gcloud stub log, RUN 2) ---
+
+  services enable               : 1   (idempotent in gcloud)
+  describe calls (total)        : 8   (same as RUN 1: existence checks + 2x projects describe)
+  create calls (total)          : 0   (all 6 resource creations skipped)
+  add-iam-policy-binding calls  : 6   (re-applied; idempotent at policy level)
+
+Zero creates on RUN 2 is the primary idempotence signal. Combined with
+the RUN 1 count of 6 creates (exactly one per unique resource), the
+two-run pair proves R01.9 (idempotence with no resource drift).
+
+--- DIFF: RUN 1 vs RUN 2 ---
+
+  RUN 1: 6 creates + 6 bindings + 1 services-enable + 8 describes
+  RUN 2: 0 creates + 6 bindings + 1 services-enable + 8 describes
+
+The 12 binding calls across both runs produce zero policy drift because
+`gcloud ... add-iam-policy-binding` is idempotent by design.
+
+The summary block is byte-identical between RUN 1 and RUN 2 (output of
+`diff <(run1_summary) <(run2_summary)` is empty), confirming it derives
+solely from static identifiers and live lookups -- no per-run state.

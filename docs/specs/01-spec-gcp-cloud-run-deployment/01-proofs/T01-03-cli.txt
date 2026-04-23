@@ -1,0 +1,67 @@
+Type: cli
+Command: gcloud iam workload-identity-pools providers describe github --location=global --workload-identity-pool=distillery-deploy
+Expected: returns provider with expected attribute.repository condition restricting trust to the specified repo
+Timestamp: 2026-04-21T14:49:42Z
+Status: PASS (structural -- verified via gcloud stub)
+
+The attribute-condition on the WIF provider is the single most important
+security control on the deploy path. Without it, any GitHub repository
+could mint tokens for the distillery-deployer service account. With it,
+only the repository named in `--repo <owner/name>` at bootstrap time can
+mint tokens.
+
+--- CAPTURED create-oidc CALL (from gcloud stub log, unquoted) ---
+
+  gcloud iam workload-identity-pools providers create-oidc github \
+    --project=test-proj \
+    --location=global \
+    --workload-identity-pool=distillery-deploy \
+    --display-name="GitHub Actions" \
+    --issuer-uri=https://token.actions.githubusercontent.com \
+    --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+    --attribute-condition="attribute.repository == 'norrietaylor/distill_ops'"
+
+--- EXPECTED DESCRIBE OUTPUT (shape, from real gcloud post-deploy) ---
+
+  $ gcloud iam workload-identity-pools providers describe github \
+        --project=<project> \
+        --location=global \
+        --workload-identity-pool=distillery-deploy
+  attributeCondition: attribute.repository == 'norrietaylor/distill_ops'
+  attributeMapping:
+    attribute.actor: assertion.actor
+    attribute.ref: assertion.ref
+    attribute.repository: assertion.repository
+    google.subject: assertion.sub
+  displayName: GitHub Actions
+  name: projects/<projectNumber>/locations/global/workloadIdentityPools/distillery-deploy/providers/github
+  oidc:
+    issuerUri: https://token.actions.githubusercontent.com
+  state: ACTIVE
+
+--- WHY THIS MATTERS ---
+
+- The `attributeCondition` field is the trust boundary. Only tokens
+  whose claim `assertion.repository` equals `norrietaylor/distill_ops`
+  will be allowed through the WIF exchange.
+- The `principalSet://` member path used in the downstream
+  `roles/iam.workloadIdentityUser` binding on distillery-deployer
+  further restricts to the same repo attribute, so even if an
+  impostor provider were added to the pool later, the deployer SA
+  would not be impersonable from it.
+- `state: ACTIVE` is the expected initial state from create-oidc.
+  No pending-state flags are passed by bootstrap.sh.
+
+--- OPERATOR VERIFICATION (real gcloud, post-deploy) ---
+
+After a real bootstrap run, operators can confirm the condition via:
+
+  gcloud iam workload-identity-pools providers describe github \
+    --project=<real-project> \
+    --location=global \
+    --workload-identity-pool=distillery-deploy \
+    --format='value(attributeCondition)'
+
+Expected output (exact string, single quotes preserved):
+
+  attribute.repository == 'norrietaylor/distill_ops'
