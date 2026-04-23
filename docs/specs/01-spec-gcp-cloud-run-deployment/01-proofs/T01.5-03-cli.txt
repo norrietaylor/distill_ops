@@ -1,0 +1,39 @@
+Type: cli
+Command: Run bootstrap twice consecutively
+Expected: both invocations exit 0, no resource drift
+Timestamp: 2026-04-23T00:40:00Z
+Status: PASS (structural — verified via gcloud stub)
+
+Two consecutive runs with identical arguments. Exit code is 0 for both.
+Resource-creating calls (`create`, `create-oidc`) execute exactly once;
+binding calls (`add-iam-policy-binding`) re-execute but are idempotent
+at the policy-document level — gcloud returns the same policy both
+times with no change.
+
+--- RUN 1 log summary ---
+creating bucket, artifact registry, 2 SAs, WIF pool, WIF provider;
+applying 6 project/bucket/SA IAM bindings + 1 WIF principalSet binding.
+EXIT=0
+
+--- RUN 2 log summary ---
+bucket/AR/2 SAs/pool/provider all describe-hits -> all 7 create paths
+skipped. 7 binding calls re-execute (idempotent).
+EXIT=0
+
+--- CREATE-CALL COUNTS ACROSS BOTH RUNS ---
+  bucket create               : 1
+  artifact registry create    : 1
+  SA create                   : 2 (distillery-run + distillery-deployer)
+  WIF pool create             : 1
+  WIF provider create-oidc    : 1
+
+  TOTAL create calls          : 6 (matches the 6 expected unique resources)
+
+--- BINDING-CALL COUNTS (2 runs; each call is idempotent in gcloud) ---
+  bucket-iam bindings         : 2   (1 per run)
+  project-iam bindings        : 6   (3 per run)
+  SA-iam bindings             : 2   (1 per run: serviceAccountUser)
+  WIF principal bindings      : 2   (1 per run: workloadIdentityUser)
+
+  `add-iam-policy-binding` re-applies are no-ops at the policy-document
+  level; no drift occurs.

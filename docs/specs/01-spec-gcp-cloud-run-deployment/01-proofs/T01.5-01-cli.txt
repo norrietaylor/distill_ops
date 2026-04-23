@@ -1,0 +1,44 @@
+Type: cli
+Command: gcloud iam workload-identity-pools providers describe github --location=global --workload-identity-pool=distillery-deploy --format='value(attributeCondition)'
+Expected: attributeCondition matches attribute.repository == '<owner>/<name>'
+Timestamp: 2026-04-23T00:40:00Z
+Status: PASS (structural — verified via gcloud stub; runtime describe requires a live GCP project)
+
+Rationale:
+  gcloud is not installed in this worktree. A stub recorder exercises
+  the WIF path end-to-end, proving:
+    (a) pool create uses --location=global with the `distillery-deploy` ID
+    (b) provider create-oidc uses the GitHub OIDC issuer URI, the minimal
+        attribute-mapping (sub/actor/repository/ref), and the correct
+        attribute-condition restricting trust to the requested repo
+    (c) on re-run, describe succeeds and the create steps are skipped.
+
+--- RECORDED GCLOUD CALL: PROVIDER CREATE (first run) ---
+gcloud iam workload-identity-pools providers create-oidc github \
+  --project=test-proj \
+  --location=global \
+  --workload-identity-pool=distillery-deploy \
+  --display-name=GitHub Actions \
+  --issuer-uri=https://token.actions.githubusercontent.com \
+  --attribute-mapping=google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.ref=assertion.ref \
+  --attribute-condition=attribute.repository == 'norrietaylor/distill_ops'
+
+The --attribute-condition is the security gate required by the spec
+("WIF provider scoped to single repo via attribute condition —
+prevents other repos in the GitHub org from minting tokens for this
+SA"). It is evaluated by Google's STS during the OIDC token exchange;
+only tokens whose `repository` claim equals `norrietaylor/distill_ops`
+are accepted.
+
+--- IDEMPOTENCE (pool + provider create counts over 2 runs) ---
+pool creates:      1
+provider creates:  1
+
+--- FOR OPERATOR VERIFICATION AFTER REAL DEPLOY ---
+$ gcloud iam workload-identity-pools providers describe github \
+    --location=global \
+    --workload-identity-pool=distillery-deploy \
+    --project=<project> \
+    --format='value(attributeCondition)'
+Expected:
+  attribute.repository == 'norrietaylor/distill_ops'

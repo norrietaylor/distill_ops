@@ -244,6 +244,13 @@ create_service_accounts() {
   create_sa "$SA_DEPLOYER" "Distillery GitHub Actions deployer"
 }
 
+# Workload Identity Federation constants. Pool and provider IDs are
+# stable (not per-operator) so the CI workflow can hard-code provider
+# paths via the GCP_WIF_PROVIDER repo var produced by the final summary.
+WIF_POOL="distillery-deploy"
+WIF_PROVIDER="github"
+WIF_ISSUER_URI="https://token.actions.githubusercontent.com"
+
 # bind_iam attaches the minimum roles required for each SA. We use
 # add-iam-policy-binding everywhere — it is idempotent by design:
 # re-adding the same principal/role returns 0 and leaves the policy
@@ -297,6 +304,98 @@ bind_iam() {
     --role="roles/iam.serviceAccountUser" >/dev/null
 }
 
+create_wif_pool() {
+  if gcloud iam workload-identity-pools describe "$WIF_POOL" \
+       --project="$PROJECT" \
+       --location=global \
+       --format='value(name)' >/dev/null 2>&1; then
+    log "workload identity pool ${WIF_POOL} already exists — skipping"
+  else
+    log "creating workload identity pool ${WIF_POOL}"
+    gcloud iam workload-identity-pools create "$WIF_POOL" \
+      --project="$PROJECT" \
+      --location=global \
+      --display-name="Distillery deploy" \
+      --description="WIF pool for Distillery CI deploys from GitHub Actions"
+  fi
+}
+
+create_wif_provider() {
+  # Per the spec's security posture: we restrict the provider's trust
+  # to a single GitHub repo via attribute-condition. This prevents any
+  # other repository in the GitHub organization (or any public GitHub
+  # repo, for that matter) from minting tokens for the deployer SA.
+  local attr_condition
+  attr_condition="attribute.repository == '${REPO}'"
+
+  if gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
+       --project="$PROJECT" \
+       --location=global \
+       --workload-identity-pool="$WIF_POOL" \
+       --format='value(name)' >/dev/null 2>&1; then
+    log "WIF provider ${WIF_PROVIDER} already exists in pool ${WIF_POOL} — skipping"
+  else
+    log "creating WIF OIDC provider ${WIF_PROVIDER} bound to repo=${REPO}"
+    # Attribute mapping is the minimal set needed to (a) satisfy
+    # google.subject and (b) support the attribute-condition on
+    # attribute.repository. Additional mappings (actor, ref) are kept
+    # so operators can tighten the condition later without having to
+    # recreate the provider.
+    gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
+      --project="$PROJECT" \
+      --location=global \
+      --workload-identity-pool="$WIF_POOL" \
+      --display-name="GitHub Actions" \
+      --issuer-uri="$WIF_ISSUER_URI" \
+      --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+      --attribute-condition="$attr_condition"
+  fi
+}
+
+# Bind the WIF principalSet (scoped to attribute.repository == our repo)
+# to iam.workloadIdentityUser on distillery-deployer. This is the binding
+# that lets google-github-actions/auth exchange a GitHub OIDC token for a
+# short-lived access token as distillery-deployer — no long-lived key.
+bind_wif_principal() {
+  local project_number principal deployer_email
+  project_number="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+  [ -n "$project_number" ] || die "failed to look up project number for $PROJECT"
+  deployer_email="$(sa_email "$SA_DEPLOYER")"
+  principal="principalSet://iam.googleapis.com/projects/${project_number}/locations/global/workloadIdentityPools/${WIF_POOL}/attribute.repository/${REPO}"
+
+  log "binding roles/iam.workloadIdentityUser on ${deployer_email} -> WIF principalSet for repo=${REPO}"
+  gcloud iam service-accounts add-iam-policy-binding "$deployer_email" \
+    --project="$PROJECT" \
+    --role="roles/iam.workloadIdentityUser" \
+    --member="$principal" >/dev/null
+}
+
+# Emit the three values the GitHub Actions deploy workflow needs as
+# repo variables. Written to stdout (log() goes to stderr) so operators
+# can `bash bootstrap.sh ... | tail -n 8 | pbcopy` or similar.
+print_summary() {
+  local project_number deployer_email provider_resource
+  project_number="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+  deployer_email="$(sa_email "$SA_DEPLOYER")"
+  provider_resource="projects/${project_number}/locations/global/workloadIdentityPools/${WIF_POOL}/providers/${WIF_PROVIDER}"
+
+  cat <<EOF
+
+================= BOOTSTRAP SUMMARY =================
+Set these as GitHub Actions repository variables
+(Settings -> Secrets and variables -> Actions -> Variables):
+
+  GCP_PROJECT_ID=${PROJECT}
+  GCP_DEPLOYER_SA=${deployer_email}
+  GCP_WIF_PROVIDER=${provider_resource}
+
+The deploy workflow (.github/workflows/gcp-deploy.yml) reads these
+three variables and exchanges a GitHub OIDC token for a short-lived
+access token — no service-account JSON key is ever issued.
+=====================================================
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -313,8 +412,12 @@ main() {
   create_ar_repo
   create_service_accounts
   bind_iam
+  create_wif_pool
+  create_wif_provider
+  bind_wif_principal
 
-  log "done (APIs enabled, data bucket ready, artifact registry ready, service accounts + IAM bound). Later steps will be added by subsequent sub-tasks."
+  log "bootstrap complete"
+  print_summary
 }
 
 main "$@"
