@@ -214,6 +214,89 @@ create_ar_repo() {
   fi
 }
 
+# Service account account-ids. Emails are derived from these + the project.
+SA_RUN="distillery-run"
+SA_DEPLOYER="distillery-deployer"
+
+# Build the full SA email from an account-id.
+sa_email() {
+  printf '%s@%s.iam.gserviceaccount.com' "$1" "$PROJECT"
+}
+
+# Create one SA if missing; idempotent by describe-check.
+create_sa() {
+  local account_id="$1" display_name="$2" email
+  email="$(sa_email "$account_id")"
+  if gcloud iam service-accounts describe "$email" \
+       --project="$PROJECT" \
+       --format='value(email)' >/dev/null 2>&1; then
+    log "service account ${email} already exists — skipping"
+  else
+    log "creating service account ${email}"
+    gcloud iam service-accounts create "$account_id" \
+      --project="$PROJECT" \
+      --display-name="$display_name"
+  fi
+}
+
+create_service_accounts() {
+  create_sa "$SA_RUN"      "Distillery Cloud Run runtime identity"
+  create_sa "$SA_DEPLOYER" "Distillery GitHub Actions deployer"
+}
+
+# bind_iam attaches the minimum roles required for each SA. We use
+# add-iam-policy-binding everywhere — it is idempotent by design:
+# re-adding the same principal/role returns 0 and leaves the policy
+# unchanged. This means we do not need describe-first guards here.
+#
+# Scope of each binding:
+#   distillery-run      roles/storage.objectAdmin         ON data bucket only
+#   distillery-run      roles/secretmanager.secretAccessor AT project scope
+#   distillery-deployer roles/run.admin                   AT project scope
+#   distillery-deployer roles/artifactregistry.writer     AT project scope
+#   distillery-deployer roles/iam.serviceAccountUser      ON distillery-run SA only
+#
+# The run.admin role is broad. The spec's Security section flags that
+# roles/run.developer may suffice for `services replace` — keeping
+# run.admin for v1 so the CI workflow can also manage traffic if ever
+# needed; tighten in a follow-up if proven unnecessary.
+bind_iam() {
+  local run_email deployer_email bucket
+  run_email="$(sa_email "$SA_RUN")"
+  deployer_email="$(sa_email "$SA_DEPLOYER")"
+  bucket="$(bucket_name)"
+
+  log "binding roles/storage.objectAdmin on gs://${bucket} -> ${run_email}"
+  gcloud storage buckets add-iam-policy-binding "gs://${bucket}" \
+    --project="$PROJECT" \
+    --member="serviceAccount:${run_email}" \
+    --role="roles/storage.objectAdmin" >/dev/null
+
+  log "binding roles/secretmanager.secretAccessor (project) -> ${run_email}"
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${run_email}" \
+    --role="roles/secretmanager.secretAccessor" \
+    --condition=None >/dev/null
+
+  log "binding roles/run.admin (project) -> ${deployer_email}"
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${deployer_email}" \
+    --role="roles/run.admin" \
+    --condition=None >/dev/null
+
+  log "binding roles/artifactregistry.writer (project) -> ${deployer_email}"
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member="serviceAccount:${deployer_email}" \
+    --role="roles/artifactregistry.writer" \
+    --condition=None >/dev/null
+
+  log "binding roles/iam.serviceAccountUser on ${run_email} -> ${deployer_email}"
+  gcloud iam service-accounts add-iam-policy-binding "$run_email" \
+    --project="$PROJECT" \
+    --member="serviceAccount:${deployer_email}" \
+    --role="roles/iam.serviceAccountUser" >/dev/null
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -228,8 +311,10 @@ main() {
   enable_apis
   create_bucket
   create_ar_repo
+  create_service_accounts
+  bind_iam
 
-  log "done (APIs enabled, data bucket ready, artifact registry ready). Later steps will be added by subsequent sub-tasks."
+  log "done (APIs enabled, data bucket ready, artifact registry ready, service accounts + IAM bound). Later steps will be added by subsequent sub-tasks."
 }
 
 main "$@"
