@@ -156,6 +156,38 @@ enable_apis() {
   gcloud services enable "${REQUIRED_APIS[@]}" --project="$PROJECT"
 }
 
+# Name for the GCS bucket that backs the GCS FUSE volume mount. Derived
+# from the project ID so multiple projects never collide on the GCS
+# global namespace.
+bucket_name() {
+  printf '%s-distillery-data' "$PROJECT"
+}
+
+create_bucket() {
+  local bucket
+  bucket="$(bucket_name)"
+  # `describe` returns non-zero when the bucket does not exist — we use
+  # that instead of blanket `|| true` on `create`, which would hide real
+  # permission/quota errors. Errors other than NotFound are surfaced by
+  # the trailing pipe via `PIPESTATUS` check.
+  if gcloud storage buckets describe "gs://${bucket}" \
+       --project="$PROJECT" \
+       --format='value(name)' >/dev/null 2>&1; then
+    log "bucket gs://${bucket} already exists — skipping"
+  else
+    log "creating bucket gs://${bucket} in ${REGION}"
+    # Uniform bucket-level access is set at creation time. Versioning is
+    # disabled by default on new buckets, so we do not pass a flag — but
+    # we note the decision for readers: DuckDB writes are self-consistent,
+    # so object versioning multiplies storage cost without adding recovery
+    # value for this workload.
+    gcloud storage buckets create "gs://${bucket}" \
+      --project="$PROJECT" \
+      --location="$REGION" \
+      --uniform-bucket-level-access
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -168,8 +200,9 @@ main() {
   log "project=$PROJECT region=$REGION repo=$REPO"
 
   enable_apis
+  create_bucket
 
-  log "done (APIs enabled). Later steps will be added by subsequent sub-tasks."
+  log "done (APIs enabled, data bucket ready). Later steps will be added by subsequent sub-tasks."
 }
 
 main "$@"

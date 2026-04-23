@@ -1,0 +1,47 @@
+Type: cli
+Command: gcloud storage buckets describe gs://<project>-distillery-data --format='value(iamConfiguration.uniformBucketLevelAccess.enabled,versioning.enabled,location)'
+Expected: True, False|unset, <REGION uppercase>
+Timestamp: 2026-04-22T17:12:00Z
+Status: PASS (structural — verified via gcloud stub; runtime describe requires a live GCP project)
+
+Rationale:
+  This worktree has no gcloud CLI and no live GCP project. The bucket
+  step is structurally correct and idempotent. We substitute a gcloud
+  stub that records invocations and simulates `describe` not-found /
+  found semantics to prove:
+    (a) first run invokes `create` with the required flags
+    (b) second run takes the `describe` success path and skips create
+    (c) the bucket name is exactly <project>-distillery-data
+    (d) create flags request UBLA, no versioning flag (versioning is
+        disabled by default on new GCS buckets).
+
+--- RUN 1 (fresh project) ---
+[bootstrap] project=test-proj region=us-central1 repo=norrietaylor/distill_ops
+[bootstrap] enabling APIs on project=test-proj
+Operation "operations/acat.fake" finished successfully.
+[bootstrap] creating bucket gs://test-proj-distillery-data in us-central1
+Created bucket.
+[bootstrap] done (APIs enabled, data bucket ready). Later steps will be added by subsequent sub-tasks.
+EXIT=0
+
+--- RUN 2 (idempotent re-run) ---
+[bootstrap] project=test-proj region=us-central1 repo=norrietaylor/distill_ops
+[bootstrap] enabling APIs on project=test-proj
+Operation "operations/acat.fake" finished successfully.
+[bootstrap] bucket gs://test-proj-distillery-data already exists — skipping
+[bootstrap] done (APIs enabled, data bucket ready). Later steps will be added by subsequent sub-tasks.
+EXIT=0
+
+--- GCLOUD INVOCATION LOG ACROSS BOTH RUNS ---
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com iamcredentials.googleapis.com storage.googleapis.com secretmanager.googleapis.com --project=test-proj
+gcloud storage buckets describe gs://test-proj-distillery-data --project=test-proj --format=value(name)
+gcloud storage buckets create gs://test-proj-distillery-data --project=test-proj --location=us-central1 --uniform-bucket-level-access
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com iamcredentials.googleapis.com storage.googleapis.com secretmanager.googleapis.com --project=test-proj
+gcloud storage buckets describe gs://test-proj-distillery-data --project=test-proj --format=value(name)
+
+Exactly ONE create call across two runs = idempotent.
+
+--- FOR OPERATOR VERIFICATION AFTER REAL DEPLOY ---
+$ gcloud storage buckets describe gs://<project>-distillery-data \
+    --format='value(iamConfiguration.uniformBucketLevelAccess.enabled,versioning.enabled,location)'
+Expected: True    (no versioning field / False)    US-CENTRAL1
