@@ -27,8 +27,16 @@ spec:
   template:
     metadata:
       annotations:
-        # Enable GCS FUSE CSI driver for persistent volume
-        run.googleapis.com/cloudsql-instances: ""
+        # Single-writer constraint: max=1 prevents concurrent DuckDB writers
+        # on the GCS FUSE volume. Do NOT raise this — DuckDB assumes a single
+        # process owns the .db file and its WAL. See spec Non-Goals and
+        # Technical Considerations sections for background.
+        run.googleapis.com/max-instances: '1'
+        # Scale-to-zero: no idle charges, cold-start tolerated via startup probe.
+        run.googleapis.com/min-instances: '0'
+        # Keep CPU unthrottled so GCS FUSE mount + app init finish before the
+        # startup probe hits its failureThreshold on a cold revision.
+        run.googleapis.com/cpu-throttling: 'false'
     spec:
       serviceAccountName: distillery-run
       timeoutSeconds: 300
