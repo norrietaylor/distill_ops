@@ -36,14 +36,19 @@ RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/su"]
 # so tokens survive machine autostop/restart cycles.
 ENV FASTMCP_HOME=/data/fastmcp
 
-# Copy Fly-specific config
-COPY fly/distillery-fly.yaml /app/distillery-fly.yaml
+# Copy Fly-specific config. Owned by uid/gid 65532 (the upstream Chainguard
+# `nonroot` user — see distillery#419 / its root Dockerfile) so a separate
+# build-time recursive chown isn't needed: every other file under /app is
+# already 65532-owned by the upstream image.
+COPY --chown=65532:65532 fly/distillery-fly.yaml /app/distillery-fly.yaml
 ENV DISTILLERY_CONFIG=/app/distillery-fly.yaml
-
-RUN chown -R appuser:appuser /app
 
 EXPOSE 8000
 
-# Fix volume ownership at runtime (Fly mounts as root), then drop to appuser.
+# Fix volume ownership at runtime (Fly mounts as root), then drop to the
+# upstream `nonroot` user (uid/gid 65532). The chown uses uid:gid form so
+# it doesn't depend on /etc/passwd lookups; the privilege drop uses the
+# username `nonroot` because busybox `su` takes a name (Chainguard's
+# distroless image ships /etc/passwd with the `nonroot` entry).
 # Set RESET_DB=true in Fly secrets to wipe the database on next boot (one-shot).
-CMD ["sh", "-c", "chown -R appuser:appuser /data && if [ \"$RESET_DB\" = 'true' ]; then rm -f /data/distillery.db /data/distillery.db.wal && echo 'DB reset complete'; fi && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]
+CMD ["sh", "-c", "chown -R 65532:65532 /data && if [ \"$RESET_DB\" = 'true' ]; then rm -f /data/distillery.db /data/distillery.db.wal && echo 'DB reset complete'; fi && exec su -s /bin/sh nonroot -c 'distillery-mcp --transport http'"]
