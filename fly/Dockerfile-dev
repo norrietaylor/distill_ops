@@ -6,9 +6,32 @@
 # distillery repo's staging-deploy.yml workflow.
 
 ARG IMAGE_TAG=staging
+
+# Static busybox stage — provides /bin/sh and the basic utilities our
+# runtime CMD depends on (stat, chown, rm, install, touch, echo, su,
+# ln). Upstream distillery images switched to a shell-less base, so
+# every `RUN <command>` and the `CMD ["sh", "-c", "..."]` below fail
+# without an injected shell. busybox-musl is a single static binary —
+# symlinks let the existing scripts work without rewriting the init.
+# Track upstream restoration of a POSIX shell in norrietaylor/distillery.
+FROM busybox:musl AS shell
+
 FROM ghcr.io/norrietaylor/distillery:${IMAGE_TAG}
 
 USER root
+
+# Inject busybox + symlinks for the applets we use at build/runtime.
+# The first RUN is exec form (no shell needed yet) — it execs busybox
+# directly to create /bin/sh. After that, shell-form RUN/CMD work.
+COPY --from=shell /bin/busybox /usr/local/bin/busybox
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/sh"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/chown"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/rm"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/echo"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/su"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/stat"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/install"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/touch"]
 
 # FastMCP's OAuth state (registered clients + issued access tokens)
 # lives under FASTMCP_HOME — same layout as prod. The staging volume
