@@ -33,7 +33,10 @@ jobs:
   poll:
     name: Poll Feed Sources
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30 (not 15): warm step can spend up to 600s and webhook POST up to
+    # another 600s with retries — 15-min cap could kill a recovering run
+    # before the webhook completes.
+    timeout-minutes: 30
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'poll' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '23 * * * *'
@@ -47,8 +50,16 @@ jobs:
           # edge proxy's auto_start_machines (see distillery#406). Tolerate
           # "already started" — that's the happy path. Fail loudly only if
           # flyctl itself can't reach the API.
-          set -o pipefail
-          machine_ids=$(flyctl machine list -a distillery-mcp -j | jq -r '.[].id')
+          # Run flyctl first and check its exit status BEFORE piping into
+          # jq. If flyctl fails, an inline `flyctl | jq` substitution would
+          # leave machine_ids empty and the `[ -z ]` branch below would
+          # silently `exit 0`, masking the API outage. Capture stdout
+          # separately so a non-zero flyctl status surfaces as a job error.
+          if ! flyctl_json=$(flyctl machine list -a distillery-mcp -j); then
+            echo "::error::flyctl machine list failed for distillery-mcp"
+            exit 1
+          fi
+          machine_ids=$(printf '%s' "$flyctl_json" | jq -r '.[].id')
           if [ -z "$machine_ids" ]; then
             echo "::warning::No machines found for distillery-mcp"
             exit 0
@@ -108,7 +119,7 @@ jobs:
   rescore:
     name: Rescore Feed Entries
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'rescore' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '17 6 * * *'
@@ -118,8 +129,16 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          set -o pipefail
-          machine_ids=$(flyctl machine list -a distillery-mcp -j | jq -r '.[].id')
+          # Run flyctl first and check its exit status BEFORE piping into
+          # jq. If flyctl fails, an inline `flyctl | jq` substitution would
+          # leave machine_ids empty and the `[ -z ]` branch below would
+          # silently `exit 0`, masking the API outage. Capture stdout
+          # separately so a non-zero flyctl status surfaces as a job error.
+          if ! flyctl_json=$(flyctl machine list -a distillery-mcp -j); then
+            echo "::error::flyctl machine list failed for distillery-mcp"
+            exit 1
+          fi
+          machine_ids=$(printf '%s' "$flyctl_json" | jq -r '.[].id')
           if [ -z "$machine_ids" ]; then
             echo "::warning::No machines found for distillery-mcp"
             exit 0
@@ -174,7 +193,7 @@ jobs:
   maintenance:
     name: Weekly KB Maintenance
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'maintenance' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '41 7 * * 1'
@@ -184,8 +203,16 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          set -o pipefail
-          machine_ids=$(flyctl machine list -a distillery-mcp -j | jq -r '.[].id')
+          # Run flyctl first and check its exit status BEFORE piping into
+          # jq. If flyctl fails, an inline `flyctl | jq` substitution would
+          # leave machine_ids empty and the `[ -z ]` branch below would
+          # silently `exit 0`, masking the API outage. Capture stdout
+          # separately so a non-zero flyctl status surfaces as a job error.
+          if ! flyctl_json=$(flyctl machine list -a distillery-mcp -j); then
+            echo "::error::flyctl machine list failed for distillery-mcp"
+            exit 1
+          fi
+          machine_ids=$(printf '%s' "$flyctl_json" | jq -r '.[].id')
           if [ -z "$machine_ids" ]; then
             echo "::warning::No machines found for distillery-mcp"
             exit 0
