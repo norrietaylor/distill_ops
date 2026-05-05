@@ -45,6 +45,16 @@ ENV DISTILLERY_CONFIG=/app/distillery-fly.yaml
 
 EXPOSE 8000
 
+# Clear the upstream ENTRYPOINT (`distillery-mcp`) so our CMD runs as
+# the literal command instead of being appended as arguments to the
+# entrypoint binary. Without this, Docker concatenates ENTRYPOINT + CMD
+# into `distillery-mcp sh -c "<our script>"`, which makes argparse fail
+# with `unrecognized arguments: sh -c chown ...` and exit 2 in a tight
+# crash loop. The new init responsibility belongs to our shell script —
+# it does the runtime chown / RESET_DB / privilege drop and only then
+# execs `distillery-mcp` itself.
+ENTRYPOINT []
+
 # Fix volume ownership at runtime (Fly mounts as root), then drop to the
 # upstream `nonroot` user (uid/gid 65532). The chown uses uid:gid form so
 # it doesn't depend on /etc/passwd lookups; the privilege drop uses the
