@@ -31,6 +31,7 @@ RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/chow
 RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/rm"]
 RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/echo"]
 RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/su"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/stat"]
 
 # Persist FastMCP OAuth state (client registrations, tokens) on the Fly volume
 # so tokens survive machine autostop/restart cycles.
@@ -55,10 +56,19 @@ EXPOSE 8000
 # execs `distillery-mcp` itself.
 ENTRYPOINT []
 
-# Fix volume ownership at runtime (Fly mounts as root), then drop to the
-# upstream `nonroot` user (uid/gid 65532). The chown uses uid:gid form so
-# it doesn't depend on /etc/passwd lookups; the privilege drop uses the
-# username `nonroot` because busybox `su` takes a name (Chainguard's
-# distroless image ships /etc/passwd with the `nonroot` entry).
+# Fix volume ownership at runtime (only if not already owned — the
+# recursive chown gets expensive as the prod DB and FastMCP state grow,
+# and on every boot after the first it's a no-op). Fly mounts volumes
+# as root on first attach; once the tree is 65532-owned the probe short-
+# circuits the walk. Then drop to the upstream `nonroot` user
+# (uid/gid 65532). The chown uses uid:gid form so it doesn't depend on
+# /etc/passwd lookups; the privilege drop uses the username `nonroot`
+# because busybox `su` takes a name (Chainguard's distroless image ships
+# /etc/passwd with the `nonroot` entry).
+#
+# Ownership check uses uid (`%u`) rather than username (`%U`) so it
+# doesn't depend on /etc/passwd resolution succeeding for the comparison.
+# 65532 is the upstream Chainguard `nonroot` uid.
+#
 # Set RESET_DB=true in Fly secrets to wipe the database on next boot (one-shot).
-CMD ["sh", "-c", "chown -R 65532:65532 /data && if [ \"$RESET_DB\" = 'true' ]; then rm -f /data/distillery.db /data/distillery.db.wal && echo 'DB reset complete'; fi && exec su -s /bin/sh nonroot -c 'distillery-mcp --transport http'"]
+CMD ["sh", "-c", "if [ \"$(stat -c %u /data 2>/dev/null)\" != 65532 ]; then chown -R 65532:65532 /data; fi && if [ \"$RESET_DB\" = 'true' ]; then rm -f /data/distillery.db /data/distillery.db.wal && echo 'DB reset complete'; fi && exec su -s /bin/sh nonroot -c 'distillery-mcp --transport http'"]
