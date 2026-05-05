@@ -1,0 +1,253 @@
+name: Fly Image Smoke Test
+
+# Build the Fly prod and staging images and assert the runtime contract
+# we depend on (cleared ENTRYPOINT, sh -c CMD shape, /bin/sh present,
+# nonroot user present) before any flyctl deploy can ship them.
+#
+# The 14-hour outage on 2026-05-04 was caused by Docker concatenating
+# upstream's ENTRYPOINT ["distillery-mcp"] with our CMD ["sh","-c",...]
+# into `distillery-mcp sh -c <script>`, crashing on argparse. This job
+# would have caught that exact regression at PR review time.
+
+on:
+  pull_request:
+    paths:
+      - 'fly/Dockerfile'
+      - 'fly/Dockerfile-dev'
+      - 'fly/distillery-*.yaml'
+      - '.github/workflows/fly-image-smoke.yml'
+  repository_dispatch:
+    types: [container-published]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Upstream tag to test'
+        required: false
+        default: 'latest'
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  prod-image-smoke:
+    name: Prod image smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Default to 'latest' for PR triggers (no tag input). For
+      # workflow_dispatch and container-published the inputs/payload
+      # take precedence.
+      IMAGE_TAG: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Validate IMAGE_TAG
+        run: |
+          # Mirror staging-deploy.yml's defense-in-depth: IMAGE_TAG
+          # flows into `docker build --build-arg`, which means it ends
+          # up substituted into a FROM line. Constrain to the formats
+          # produced by the distillery supply-chain / staging-deploy
+          # workflows.
+          case "${IMAGE_TAG}" in
+            pr-[0-9]*-sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches PR build format"
+              ;;
+            sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches prod sha tag format"
+              ;;
+            staging|latest)
+              echo "IMAGE_TAG=${IMAGE_TAG} matches floating tag format"
+              ;;
+            *)
+              echo "::error::IMAGE_TAG='${IMAGE_TAG}' does not match any allowed format. Expected pr-N-sha-<7hex>, sha-<7hex>, staging, or latest."
+              exit 1
+              ;;
+          esac
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build prod image
+        run: |
+          docker build \
+            -f fly/Dockerfile \
+            --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+            -t fly-smoke-prod:test \
+            .
+
+      - name: Layer 1 — assert ENTRYPOINT is cleared
+        run: |
+          # The exact regression that caused the 2026-05-04 outage:
+          # a non-empty inherited ENTRYPOINT concatenates with our CMD
+          # and breaks distillery-mcp argparse. Accept null or [] only.
+          ENTRYPOINT_JSON=$(docker inspect fly-smoke-prod:test --format '{{json .Config.Entrypoint}}')
+          echo "Entrypoint: ${ENTRYPOINT_JSON}"
+          if [ "${ENTRYPOINT_JSON}" != "null" ] && [ "${ENTRYPOINT_JSON}" != "[]" ]; then
+            echo "::error::Prod image ENTRYPOINT is '${ENTRYPOINT_JSON}' — expected null or []. This is the exact regression that caused the 2026-05-04 outage. Add 'ENTRYPOINT []' to fly/Dockerfile."
+            exit 1
+          fi
+          echo "ENTRYPOINT correctly cleared"
+
+      - name: Layer 1 — assert CMD shape is [sh, -c, ...]
+        run: |
+          CMD_JSON=$(docker inspect fly-smoke-prod:test --format '{{json .Config.Cmd}}')
+          echo "Cmd: ${CMD_JSON}"
+          if ! echo "${CMD_JSON}" | jq -e '.[0] == "sh" and .[1] == "-c"' >/dev/null; then
+            echo "::error::Prod image CMD does not start with [\"sh\", \"-c\"]: ${CMD_JSON}. The runtime init script is wrapped in sh -c so it can do chown/RESET_DB/su before exec'ing distillery-mcp."
+            exit 1
+          fi
+          echo "CMD shape is [sh, -c, ...]"
+
+      - name: Layer 2 — runtime smoke (busybox /bin/sh works)
+        run: |
+          # Override entrypoint to /bin/sh and run a trivial command.
+          # This proves the busybox shell injection is intact — without
+          # /bin/sh the CMD's `sh -c` would fail with `exec: /bin/sh:
+          # no such file or directory`.
+          #
+          # Capture stderr too (2>&1) and use `if ! OUT=$(...)` so a
+          # docker run failure surfaces as our custom ::error:: with
+          # the underlying message intact, instead of bash -e aborting
+          # the step before our annotation can fire.
+          if ! OUT=$(docker run --rm --entrypoint /bin/sh fly-smoke-prod:test -c 'echo SHELL_OK' 2>&1); then
+            echo "::error::Prod image /bin/sh smoke crashed before producing output: ${OUT}. The busybox symlink in fly/Dockerfile may be broken."
+            exit 1
+          fi
+          echo "stdout: ${OUT}"
+          if [ "${OUT}" != "SHELL_OK" ]; then
+            echo "::error::Prod image /bin/sh smoke failed — expected stdout 'SHELL_OK', got '${OUT}'. The busybox symlink in fly/Dockerfile may be broken."
+            exit 1
+          fi
+
+      - name: Layer 2 — runtime smoke (nonroot user exists)
+        run: |
+          # The CMD calls `su -s /bin/sh nonroot -c '...'`. If the
+          # upstream image renames or removes the nonroot user the
+          # privilege drop fails and the machine crash-loops.
+          #
+          # Use a pure-shell parse of /etc/passwd: the prod image only
+          # symlinks `sh chown rm echo su stat` from busybox, so neither
+          # `getent` nor `grep` is on PATH. busybox sh (POSIX) supports
+          # `while IFS=: read`, which is enough to scan /etc/passwd
+          # without depending on any external command.
+          #
+          # Same failure-safe `if ! OUT=$(...)` pattern as the /bin/sh
+          # smoke above so a docker run crash produces our custom
+          # ::error:: instead of bash -e aborting the step silently.
+          if ! OUT=$(docker run --rm --entrypoint /bin/sh fly-smoke-prod:test -c \
+            'while IFS=: read -r u _; do [ "$u" = nonroot ] && { echo USER_OK; exit 0; }; done < /etc/passwd; exit 1' 2>&1); then
+            echo "::error::Prod image nonroot probe crashed: ${OUT}. /etc/passwd may be missing or unreadable in the upstream image."
+            exit 1
+          fi
+          echo "stdout: ${OUT}"
+          if [ "${OUT}" != "USER_OK" ]; then
+            echo "::error::Prod image is missing the nonroot user — 'su -s /bin/sh nonroot' in fly/Dockerfile CMD will fail at runtime. Upstream may have renamed the user."
+            exit 1
+          fi
+
+  staging-image-smoke:
+    name: Staging image smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Default to 'staging' here — staging consumes the floating
+      # 'staging' tag from upstream by convention, mirroring
+      # fly/Dockerfile-dev's ARG default.
+      IMAGE_TAG: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'staging' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Validate IMAGE_TAG
+        run: |
+          case "${IMAGE_TAG}" in
+            pr-[0-9]*-sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches PR build format"
+              ;;
+            sha-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              echo "IMAGE_TAG=${IMAGE_TAG} matches prod sha tag format"
+              ;;
+            staging|latest)
+              echo "IMAGE_TAG=${IMAGE_TAG} matches floating tag format"
+              ;;
+            *)
+              echo "::error::IMAGE_TAG='${IMAGE_TAG}' does not match any allowed format. Expected pr-N-sha-<7hex>, sha-<7hex>, staging, or latest."
+              exit 1
+              ;;
+          esac
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build staging image
+        run: |
+          docker build \
+            -f fly/Dockerfile-dev \
+            --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+            -t fly-smoke-staging:test \
+            .
+
+      - name: Layer 1 — assert ENTRYPOINT is cleared
+        run: |
+          ENTRYPOINT_JSON=$(docker inspect fly-smoke-staging:test --format '{{json .Config.Entrypoint}}')
+          echo "Entrypoint: ${ENTRYPOINT_JSON}"
+          if [ "${ENTRYPOINT_JSON}" != "null" ] && [ "${ENTRYPOINT_JSON}" != "[]" ]; then
+            echo "::error::Staging image ENTRYPOINT is '${ENTRYPOINT_JSON}' — expected null or []. Add 'ENTRYPOINT []' to fly/Dockerfile-dev."
+            exit 1
+          fi
+          echo "ENTRYPOINT correctly cleared"
+
+      - name: Layer 1 — assert CMD shape is [sh, -c, ...]
+        run: |
+          CMD_JSON=$(docker inspect fly-smoke-staging:test --format '{{json .Config.Cmd}}')
+          echo "Cmd: ${CMD_JSON}"
+          if ! echo "${CMD_JSON}" | jq -e '.[0] == "sh" and .[1] == "-c"' >/dev/null; then
+            echo "::error::Staging image CMD does not start with [\"sh\", \"-c\"]: ${CMD_JSON}."
+            exit 1
+          fi
+          echo "CMD shape is [sh, -c, ...]"
+
+      - name: Layer 2 — runtime smoke (busybox /bin/sh works)
+        run: |
+          # Failure-safe capture: see prod-image-smoke equivalent for
+          # rationale. `if ! OUT=$(...)` ensures a docker run crash
+          # produces our ::error:: instead of bash -e aborting silently.
+          if ! OUT=$(docker run --rm --entrypoint /bin/sh fly-smoke-staging:test -c 'echo SHELL_OK' 2>&1); then
+            echo "::error::Staging image /bin/sh smoke crashed before producing output: ${OUT}."
+            exit 1
+          fi
+          echo "stdout: ${OUT}"
+          if [ "${OUT}" != "SHELL_OK" ]; then
+            echo "::error::Staging image /bin/sh smoke failed — expected stdout 'SHELL_OK', got '${OUT}'."
+            exit 1
+          fi
+
+      - name: Layer 2 — runtime smoke (nonroot user exists)
+        run: |
+          # Pure-shell /etc/passwd parse — busybox sh only, no
+          # dependency on getent / grep / awk being on PATH. See the
+          # equivalent prod-image-smoke step for the rationale.
+          if ! OUT=$(docker run --rm --entrypoint /bin/sh fly-smoke-staging:test -c \
+            'while IFS=: read -r u _; do [ "$u" = nonroot ] && { echo USER_OK; exit 0; }; done < /etc/passwd; exit 1' 2>&1); then
+            echo "::error::Staging image nonroot probe crashed: ${OUT}."
+            exit 1
+          fi
+          echo "stdout: ${OUT}"
+          if [ "${OUT}" != "USER_OK" ]; then
+            echo "::error::Staging image is missing the nonroot user — 'su -s /bin/sh nonroot' in fly/Dockerfile-dev CMD will fail at runtime."
+            exit 1
+          fi
