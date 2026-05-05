@@ -55,6 +55,11 @@ ENV DISTILLERY_CONFIG=/app/distillery-staging.yaml
 
 EXPOSE 8000
 
+# Clear the upstream ENTRYPOINT (`distillery-mcp`) so our CMD runs as
+# the literal command. Without this, ENTRYPOINT + CMD concatenate into
+# `distillery-mcp sh -c "<our script>"` and argparse exits with code 2.
+ENTRYPOINT []
+
 # Fix volume ownership at runtime (only if not already owned — the
 # recursive chown gets expensive as the forked DB grows, and on all
 # boots after the first of a given deploy it's a no-op), wipe
