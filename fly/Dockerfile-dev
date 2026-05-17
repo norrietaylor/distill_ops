@@ -6,9 +6,32 @@
 # distillery repo's staging-deploy.yml workflow.
 
 ARG IMAGE_TAG=staging
+
+# Static busybox stage — provides /bin/sh and the basic utilities our
+# runtime CMD depends on (stat, chown, rm, install, touch, echo, su,
+# ln). Upstream distillery images switched to a shell-less base, so
+# every `RUN <command>` and the `CMD ["sh", "-c", "..."]` below fail
+# without an injected shell. busybox-musl is a single static binary —
+# symlinks let the existing scripts work without rewriting the init.
+# Track upstream restoration of a POSIX shell in norrietaylor/distillery.
+FROM busybox:musl AS shell
+
 FROM ghcr.io/norrietaylor/distillery:${IMAGE_TAG}
 
 USER root
+
+# Inject busybox + symlinks for the applets we use at build/runtime.
+# The first RUN is exec form (no shell needed yet) — it execs busybox
+# directly to create /bin/sh. After that, shell-form RUN/CMD work.
+COPY --from=shell /bin/busybox /usr/local/bin/busybox
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/sh"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/chown"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/rm"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/echo"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/su"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/stat"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/install"]
+RUN ["/usr/local/bin/busybox", "ln", "-sf", "/usr/local/bin/busybox", "/bin/touch"]
 
 # FastMCP's OAuth state (registered clients + issued access tokens)
 # lives under FASTMCP_HOME — same layout as prod. The staging volume
@@ -24,18 +47,27 @@ USER root
 # preserving tokens across Fly auto-suspend/resume cycles.
 ENV FASTMCP_HOME=/data/fastmcp
 
-# Copy staging-specific config
-COPY fly/distillery-staging.yaml /app/distillery-staging.yaml
+# Copy staging-specific config. Owned by uid/gid 65532 (the upstream
+# Chainguard `nonroot` user — see distillery#419) so a separate
+# build-time recursive chown isn't needed.
+COPY --chown=65532:65532 fly/distillery-staging.yaml /app/distillery-staging.yaml
 ENV DISTILLERY_CONFIG=/app/distillery-staging.yaml
 
-RUN chown -R appuser:appuser /app
-
 EXPOSE 8000
+
+# Clear the upstream ENTRYPOINT (`distillery-mcp`) so our CMD runs as
+# the literal command. Without this, ENTRYPOINT + CMD concatenate into
+# `distillery-mcp sh -c "<our script>"` and argparse exits with code 2.
+ENTRYPOINT []
 
 # Fix volume ownership at runtime (only if not already owned — the
 # recursive chown gets expensive as the forked DB grows, and on all
 # boots after the first of a given deploy it's a no-op), wipe
-# inherited FastMCP OAuth state ONCE per deploy, then drop to appuser.
+# inherited FastMCP OAuth state ONCE per deploy, then drop to nonroot.
+#
+# Ownership check uses uid (`%u`) rather than username (`%U`) so it
+# doesn't depend on /etc/passwd resolution succeeding for the comparison.
+# 65532 is the upstream Chainguard `nonroot` uid.
 #
 # The staging volume is forked fresh from prod on every deploy, so the
 # first boot must wipe /data/fastmcp to avoid inheriting prod tokens.
@@ -44,10 +76,10 @@ EXPOSE 8000
 # file (/data/fastmcp/.staged) tracks whether the wipe already ran
 # for this deploy cycle.
 CMD ["sh", "-c", "\
-  if [ \"$(stat -c %U /data 2>/dev/null)\" != appuser ]; then chown -R appuser:appuser /data; fi \
+  if [ \"$(stat -c %u /data 2>/dev/null)\" != 65532 ]; then chown -R 65532:65532 /data; fi \
   && if [ ! -f /data/fastmcp/.staged ]; then \
        rm -rf /data/fastmcp \
-       && install -d -o appuser -g appuser /data/fastmcp \
+       && install -d -o 65532 -g 65532 /data/fastmcp \
        && touch /data/fastmcp/.staged; \
      fi \
-  && exec su -s /bin/sh appuser -c 'distillery-mcp --transport http'"]
+  && exec su -s /bin/sh nonroot -c 'distillery-mcp --transport http'"]

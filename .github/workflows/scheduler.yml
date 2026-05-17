@@ -18,11 +18,23 @@ on:
           - maintenance
           - all
 
+# Each job runs as a matrix over deploy targets (fly always; gcp when
+# vars.DISTILLERY_GCP_URL is set). Per target:
+#   1. (fly only) Install flyctl and force-start suspended machines via the
+#      Machines API — more reliable than the edge proxy's auto_start hook,
+#      which can wedge for hours (distillery#406). Cloud Run has no
+#      equivalent; its scale-to-zero cold start is covered by step 2.
+#   2. Probe the target URL until the app answers 200.
+#   3. POST the webhook with retries; record a per-target status line.
+
 jobs:
   poll:
     name: Poll Feed Sources (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30 (not 15): warm step can spend up to 600s and webhook POST up to
+    # another 600s with retries — 15-min cap could kill a recovering run
+    # before the webhook completes.
+    timeout-minutes: 30
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'poll' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '23 * * * *'
@@ -41,6 +53,39 @@ jobs:
         if: ${{ !matrix.enabled || matrix.url == '' }}
         run: |
           echo "Target ${{ matrix.target }} is not configured — skipping"
+      - name: Set up flyctl
+        if: ${{ matrix.target == 'fly' && matrix.enabled && matrix.url != '' }}
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master @ 2026-04-08, node24 runtime (post-v1.5, no newer tag)
+      - name: Force-start any suspended Fly machines
+        if: ${{ matrix.target == 'fly' && matrix.enabled && matrix.url != '' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Talk directly to the Machines API instead of waiting on the
+          # edge proxy's auto_start_machines (see distillery#406). Tolerate
+          # "already started" — that's the happy path. Fail loudly only if
+          # flyctl itself can't reach the API.
+          # Run flyctl first and check its exit status BEFORE piping into
+          # jq. If flyctl fails, an inline `flyctl | jq` substitution would
+          # leave machine_ids empty and the `[ -z ]` branch below would
+          # silently `exit 0`, masking the API outage. Capture stdout
+          # separately so a non-zero flyctl status surfaces as a job error.
+          if ! flyctl_json=$(flyctl machine list -a distillery-mcp -j); then
+            echo "::error::flyctl machine list failed for distillery-mcp"
+            exit 1
+          fi
+          machine_ids=$(printf '%s' "$flyctl_json" | jq -r '.[].id')
+          if [ -z "$machine_ids" ]; then
+            echo "::warning::No machines found for distillery-mcp"
+            exit 0
+          fi
+          for id in $machine_ids; do
+            echo "Starting machine ${id}..."
+            flyctl machine start "$id" -a distillery-mcp || \
+              echo "  (start returned non-zero — likely already running, continuing)"
+          done
+          # Brief settle so the proxy picks up the new state before we probe.
+          sleep 5
       - name: Warm ${{ matrix.target }} instance
         if: ${{ matrix.enabled && matrix.url != '' }}
         env:
@@ -48,11 +93,15 @@ jobs:
         run: |
           # Wake the suspended instance with a cheap GET and wait until
           # the app is actually ready before issuing the webhook POST.
-          deadline=$((SECONDS + 300))
+          # 600s deadline + curl retries ride out slower cold starts and
+          # transient TLS handshake failures (#406).
+          deadline=$((SECONDS + 600))
           attempt=0
           until [ "$SECONDS" -ge "$deadline" ]; do
             attempt=$((attempt + 1))
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              --connect-timeout 10 --max-time 30 \
+              --retry 2 --retry-delay 5 --retry-all-errors \
               "${TARGET_URL}/.well-known/oauth-authorization-server" || echo "000")
             if [ "$code" = "200" ]; then
               echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
@@ -61,7 +110,7 @@ jobs:
             echo "Attempt ${attempt}: HTTP ${code} — waiting for app..."
             sleep 10
           done
-          echo "::error::App did not become ready within 300s"
+          echo "::error::App did not become ready within 600s"
           exit 1
       - name: Trigger poll webhook (${{ matrix.target }})
         if: ${{ matrix.enabled && matrix.url != '' }}
@@ -91,7 +140,7 @@ jobs:
   rescore:
     name: Rescore Feed Entries (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'rescore' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '17 6 * * *'
@@ -110,16 +159,46 @@ jobs:
         if: ${{ !matrix.enabled || matrix.url == '' }}
         run: |
           echo "Target ${{ matrix.target }} is not configured — skipping"
+      - name: Set up flyctl
+        if: ${{ matrix.target == 'fly' && matrix.enabled && matrix.url != '' }}
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master @ 2026-04-08, node24 runtime (post-v1.5, no newer tag)
+      - name: Force-start any suspended Fly machines
+        if: ${{ matrix.target == 'fly' && matrix.enabled && matrix.url != '' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Run flyctl first and check its exit status BEFORE piping into
+          # jq. If flyctl fails, an inline `flyctl | jq` substitution would
+          # leave machine_ids empty and the `[ -z ]` branch below would
+          # silently `exit 0`, masking the API outage. Capture stdout
+          # separately so a non-zero flyctl status surfaces as a job error.
+          if ! flyctl_json=$(flyctl machine list -a distillery-mcp -j); then
+            echo "::error::flyctl machine list failed for distillery-mcp"
+            exit 1
+          fi
+          machine_ids=$(printf '%s' "$flyctl_json" | jq -r '.[].id')
+          if [ -z "$machine_ids" ]; then
+            echo "::warning::No machines found for distillery-mcp"
+            exit 0
+          fi
+          for id in $machine_ids; do
+            echo "Starting machine ${id}..."
+            flyctl machine start "$id" -a distillery-mcp || \
+              echo "  (start returned non-zero — likely already running, continuing)"
+          done
+          sleep 5
       - name: Warm ${{ matrix.target }} instance
         if: ${{ matrix.enabled && matrix.url != '' }}
         env:
           TARGET_URL: ${{ matrix.url }}
         run: |
-          deadline=$((SECONDS + 300))
+          deadline=$((SECONDS + 600))
           attempt=0
           until [ "$SECONDS" -ge "$deadline" ]; do
             attempt=$((attempt + 1))
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              --connect-timeout 10 --max-time 30 \
+              --retry 2 --retry-delay 5 --retry-all-errors \
               "${TARGET_URL}/.well-known/oauth-authorization-server" || echo "000")
             if [ "$code" = "200" ]; then
               echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
@@ -128,7 +207,7 @@ jobs:
             echo "Attempt ${attempt}: HTTP ${code} — waiting for app..."
             sleep 10
           done
-          echo "::error::App did not become ready within 300s"
+          echo "::error::App did not become ready within 600s"
           exit 1
       - name: Trigger rescore webhook (${{ matrix.target }})
         if: ${{ matrix.enabled && matrix.url != '' }}
@@ -158,7 +237,7 @@ jobs:
   maintenance:
     name: Weekly KB Maintenance (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     if: >
       github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'maintenance' || github.event.inputs.operation == 'all') ||
       github.event_name == 'schedule' && github.event.schedule == '41 7 * * 1'
@@ -177,16 +256,46 @@ jobs:
         if: ${{ !matrix.enabled || matrix.url == '' }}
         run: |
           echo "Target ${{ matrix.target }} is not configured — skipping"
+      - name: Set up flyctl
+        if: ${{ matrix.target == 'fly' && matrix.enabled && matrix.url != '' }}
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master @ 2026-04-08, node24 runtime (post-v1.5, no newer tag)
+      - name: Force-start any suspended Fly machines
+        if: ${{ matrix.target == 'fly' && matrix.enabled && matrix.url != '' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          # Run flyctl first and check its exit status BEFORE piping into
+          # jq. If flyctl fails, an inline `flyctl | jq` substitution would
+          # leave machine_ids empty and the `[ -z ]` branch below would
+          # silently `exit 0`, masking the API outage. Capture stdout
+          # separately so a non-zero flyctl status surfaces as a job error.
+          if ! flyctl_json=$(flyctl machine list -a distillery-mcp -j); then
+            echo "::error::flyctl machine list failed for distillery-mcp"
+            exit 1
+          fi
+          machine_ids=$(printf '%s' "$flyctl_json" | jq -r '.[].id')
+          if [ -z "$machine_ids" ]; then
+            echo "::warning::No machines found for distillery-mcp"
+            exit 0
+          fi
+          for id in $machine_ids; do
+            echo "Starting machine ${id}..."
+            flyctl machine start "$id" -a distillery-mcp || \
+              echo "  (start returned non-zero — likely already running, continuing)"
+          done
+          sleep 5
       - name: Warm ${{ matrix.target }} instance
         if: ${{ matrix.enabled && matrix.url != '' }}
         env:
           TARGET_URL: ${{ matrix.url }}
         run: |
-          deadline=$((SECONDS + 300))
+          deadline=$((SECONDS + 600))
           attempt=0
           until [ "$SECONDS" -ge "$deadline" ]; do
             attempt=$((attempt + 1))
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              --connect-timeout 10 --max-time 30 \
+              --retry 2 --retry-delay 5 --retry-all-errors \
               "${TARGET_URL}/.well-known/oauth-authorization-server" || echo "000")
             if [ "$code" = "200" ]; then
               echo "App ready after ${attempt} attempt(s) (${SECONDS}s)"
@@ -195,7 +304,7 @@ jobs:
             echo "Attempt ${attempt}: HTTP ${code} — waiting for app..."
             sleep 10
           done
-          echo "::error::App did not become ready within 300s"
+          echo "::error::App did not become ready within 600s"
           exit 1
       - name: Trigger maintenance webhook (${{ matrix.target }})
         if: ${{ matrix.enabled && matrix.url != '' }}
