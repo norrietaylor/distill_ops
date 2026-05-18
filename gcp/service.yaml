@@ -97,6 +97,12 @@ spec:
               key: latest
         - name: DISTILLERY_MCP_MACHINE_IDENTITY
           value: spectacles
+        # Gate interactive GitHub OAuth to members of this org. Machine-token
+        # clients (DISTILLERY_MCP_MACHINE_TOKEN) bypass this gate by design.
+        # If gominimal membership is private, also set a GITHUB_ORG_CHECK_TOKEN
+        # secret (a read:org PAT) so distillery can resolve membership.
+        - name: DISTILLERY_ALLOWED_ORGS
+          value: gominimal
 
         # Resource limits: 2 vCPU with 1 GiB RAM
         resources:
