@@ -86,6 +86,17 @@ spec:
             secretKeyRef:
               name: DISTILLERY_WEBHOOK_SECRET
               key: latest
+        # Pre-shared machine token for non-interactive MCP clients (CI /
+        # gh-aw agentic workflows) that cannot run the browser OAuth flow.
+        # See distillery's _MachineTokenGitHubProvider. The identity is the
+        # login attributed to the token's calls for authorship and audit.
+        - name: DISTILLERY_MCP_MACHINE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: DISTILLERY_MCP_MACHINE_TOKEN
+              key: latest
+        - name: DISTILLERY_MCP_MACHINE_IDENTITY
+          value: spectacles
 
         # Resource limits: 2 vCPU with 1 GiB RAM
         resources:
