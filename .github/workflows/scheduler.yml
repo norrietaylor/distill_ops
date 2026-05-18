@@ -130,6 +130,15 @@ jobs:
             echo "::warning::${TARGET} endpoint in cooldown (429) — skipping"
             echo "${TARGET}: cooldown (429)" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
+          elif [ "$http_code" = "409" ]; then
+            # In-flight job from a prior run that didn't finish before Fly
+            # autosuspended the machine — the app intentionally returns 409
+            # with {job_id, status_url} so a later cron can re-attach via
+            # /jobs/{id} rather than racing. Treat as warning, not failure.
+            # Upstream contract: src/distillery/mcp/webhooks.py.
+            existing_job=$(jq -r '.job_id // "unknown"' /tmp/response.json 2>/dev/null || echo unknown)
+            echo "::warning::Existing job in progress (409, job_id=${existing_job}) — skipping"
+            exit 0
           elif [ "$http_code" -ge 400 ]; then
             echo "::error::${TARGET} webhook returned HTTP ${http_code}"
             echo "${TARGET}: failed (HTTP ${http_code})" >> "${GITHUB_STEP_SUMMARY}"
@@ -227,6 +236,15 @@ jobs:
             echo "::warning::${TARGET} endpoint in cooldown (429) — skipping"
             echo "${TARGET}: cooldown (429)" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
+          elif [ "$http_code" = "409" ]; then
+            # In-flight job from a prior run that didn't finish before Fly
+            # autosuspended the machine — the app intentionally returns 409
+            # with {job_id, status_url} so a later cron can re-attach via
+            # /jobs/{id} rather than racing. Treat as warning, not failure.
+            # Upstream contract: src/distillery/mcp/webhooks.py.
+            existing_job=$(jq -r '.job_id // "unknown"' /tmp/response.json 2>/dev/null || echo unknown)
+            echo "::warning::Existing job in progress (409, job_id=${existing_job}) — skipping"
+            exit 0
           elif [ "$http_code" -ge 400 ]; then
             echo "::error::${TARGET} webhook returned HTTP ${http_code}"
             echo "${TARGET}: failed (HTTP ${http_code})" >> "${GITHUB_STEP_SUMMARY}"
@@ -323,6 +341,15 @@ jobs:
           if [ "$http_code" = "429" ]; then
             echo "::warning::${TARGET} endpoint in cooldown (429) — skipping"
             echo "${TARGET}: cooldown (429)" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          elif [ "$http_code" = "409" ]; then
+            # In-flight job from a prior run that didn't finish before Fly
+            # autosuspended the machine — the app intentionally returns 409
+            # with {job_id, status_url} so a later cron can re-attach via
+            # /jobs/{id} rather than racing. Treat as warning, not failure.
+            # Upstream contract: src/distillery/mcp/webhooks.py.
+            existing_job=$(jq -r '.job_id // "unknown"' /tmp/response.json 2>/dev/null || echo unknown)
+            echo "::warning::Existing job in progress (409, job_id=${existing_job}) — skipping"
             exit 0
           elif [ "$http_code" -ge 400 ]; then
             echo "::error::${TARGET} webhook returned HTTP ${http_code}"
