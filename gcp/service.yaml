@@ -22,7 +22,10 @@ apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: distillery
-  namespace: default
+  # Cloud Run (fully managed) requires the namespace to be the project ID
+  # (or number) — `gcloud run services replace` rejects anything else.
+  # PROJECT_ID is substituted by the deploy workflow, same as elsewhere.
+  namespace: PROJECT_ID
 spec:
   template:
     metadata:
