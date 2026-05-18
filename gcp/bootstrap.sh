@@ -28,14 +28,20 @@ REPO="${GCP_REPO:-}"
 
 # APIs required by the Cloud Run deployment. Cloud Run itself, Artifact
 # Registry for the image, IAM Credentials for WIF token exchange, Cloud
-# Storage for the FUSE-mounted data bucket, Secret Manager for the four
-# runtime secrets.
+# Storage for the FUSE-mounted data bucket, Secret Manager for the five
+# runtime secrets, and Cloud Resource Manager — gcloud resolves the
+# project through it on nearly every call. The deploy workflow's
+# `gcloud run services replace` runs as the deployer SA, for which the
+# API-consumer project is the target project itself; without this API
+# enabled there the deploy fails with a project-access error. This
+# script's own `gcloud projects describe` calls depend on it too.
 REQUIRED_APIS=(
   run.googleapis.com
   artifactregistry.googleapis.com
   iamcredentials.googleapis.com
   storage.googleapis.com
   secretmanager.googleapis.com
+  cloudresourcemanager.googleapis.com
 )
 
 # ---------------------------------------------------------------------------
