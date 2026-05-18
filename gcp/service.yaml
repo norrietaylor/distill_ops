@@ -17,6 +17,7 @@
 #    gcloud secrets create GITHUB_CLIENT_SECRET --data-file=-
 #    gcloud secrets create DISTILLERY_WEBHOOK_SECRET --data-file=-
 #    gcloud secrets create DISTILLERY_BASE_URL --data-file=-
+#    gcloud secrets create GITHUB_TOKEN --data-file=-   # gh-sync: read private-repo issues/PRs
 
 apiVersion: serving.knative.dev/v1
 kind: Service
@@ -103,6 +104,15 @@ spec:
         # secret (a read:org PAT) so distillery can resolve membership.
         - name: DISTILLERY_ALLOWED_ORGS
           value: gominimal
+        # GitHub PAT for gh-sync — lets distillery read repository content,
+        # issues, and pull requests when ingesting private repos (public
+        # repos sync without it). distillery's GitHub feed adapter reads
+        # GITHUB_TOKEN.
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: GITHUB_TOKEN
+              key: latest
 
         # Resource limits: 2 vCPU with 1 GiB RAM
         resources:
