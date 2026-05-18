@@ -1,6 +1,11 @@
 name: Deploy to GCP Cloud Run
 
 on:
+  # Auto-deploy when the distillery repo publishes a new container image
+  # (its supply-chain.yml fires this repository_dispatch). Parallel to
+  # fly-deploy.yml — both deploy targets pick up a fresh image.
+  repository_dispatch:
+    types: [container-published]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -8,9 +13,9 @@ on:
         required: false
         default: "latest"
       region:
-        description: "GCP region (default: us-central1)"
+        description: "GCP region (default: us-west2)"
         required: false
-        default: "us-central1"
+        default: "us-west2"
 
 # Prevent overlapping deploys — only one deploy runs at a time.
 concurrency:
@@ -25,6 +30,13 @@ jobs:
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+
+    # image_tag and region resolve from the repository_dispatch client_payload
+    # (container-published auto-deploy), then the workflow_dispatch inputs
+    # (manual run), then a default. The deployment lives in us-west2.
+    env:
+      IMAGE_TAG: ${{ github.event.client_payload.image_tag || github.event.inputs.image_tag || 'latest' }}
+      REGION: ${{ github.event.client_payload.region || github.event.inputs.region || 'us-west2' }}
 
     # NOTE: This workflow authenticates exclusively via Workload Identity Federation (WIF).
     # Long-lived service-account JSON keys are NEVER used. There is no credentials file,
@@ -50,15 +62,12 @@ jobs:
 
       - name: Configure Docker for Artifact Registry
         run: |
-          REGION="${{ github.event.inputs.region }}"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
       - name: Build and push container image
         id: build
         run: |
-          REGION="${{ github.event.inputs.region }}"
           PROJECT="${{ vars.GCP_PROJECT_ID }}"
-          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
           GIT_SHA="${{ github.sha }}"
 
           REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/distillery/distillery"
@@ -80,7 +89,6 @@ jobs:
       - name: Substitute image reference in service manifest
         id: manifest
         run: |
-          REGION="${{ github.event.inputs.region }}"
           PROJECT="${{ vars.GCP_PROJECT_ID }}"
           GIT_SHA="${{ github.sha }}"
 
@@ -111,8 +119,6 @@ jobs:
       - name: Deploy Cloud Run revision
         id: deploy
         run: |
-          REGION="${{ github.event.inputs.region }}"
-
           gcloud run services replace "${{ steps.manifest.outputs.manifest }}" \
             --region="${REGION}" \
             --project="${{ vars.GCP_PROJECT_ID }}"
