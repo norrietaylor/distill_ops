@@ -86,6 +86,17 @@ spec:
             secretKeyRef:
               name: DISTILLERY_WEBHOOK_SECRET
               key: latest
+        # Pre-shared machine token for non-interactive MCP clients (CI /
+        # gh-aw agentic workflows) that cannot run the browser OAuth flow.
+        # See distillery's _MachineTokenGitHubProvider. The identity is the
+        # login attributed to the token's calls for authorship and audit.
+        - name: DISTILLERY_MCP_MACHINE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: DISTILLERY_MCP_MACHINE_TOKEN
+              key: latest
+        - name: DISTILLERY_MCP_MACHINE_IDENTITY
+          value: spectacles
 
         # Resource limits: 2 vCPU with 1 GiB RAM
         resources:
@@ -98,9 +109,8 @@ spec:
           httpGet:
             path: /.well-known/oauth-authorization-server
             port: 8000
-            scheme: HTTP
           initialDelaySeconds: 5
-          timeoutSeconds: 10
+          timeoutSeconds: 4   # must be < periodSeconds (Cloud Run constraint)
           periodSeconds: 5
           failureThreshold: 6  # ~30 seconds tolerance for cold start + GCS FUSE mount
 
@@ -109,7 +119,6 @@ spec:
           httpGet:
             path: /.well-known/oauth-authorization-server
             port: 8000
-            scheme: HTTP
           periodSeconds: 30
           timeoutSeconds: 10
           failureThreshold: 3
