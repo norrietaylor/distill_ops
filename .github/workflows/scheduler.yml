@@ -115,7 +115,9 @@ jobs:
       - name: Trigger poll webhook (${{ matrix.target }})
         if: ${{ matrix.enabled && matrix.url != '' }}
         env:
-          DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
+          # Per-target webhook secret: each deployment has its own. fly uses
+          # DISTILLERY_WEBHOOK_SECRET; gcp uses DISTILLERY_GCP_WEBHOOK_SECRET.
+          DISTILLERY_WEBHOOK_SECRET: ${{ matrix.target == 'gcp' && secrets.DISTILLERY_GCP_WEBHOOK_SECRET || secrets.DISTILLERY_WEBHOOK_SECRET }}
           TARGET_URL: ${{ matrix.url }}
           TARGET: ${{ matrix.target }}
         run: |
@@ -221,7 +223,9 @@ jobs:
       - name: Trigger rescore webhook (${{ matrix.target }})
         if: ${{ matrix.enabled && matrix.url != '' }}
         env:
-          DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
+          # Per-target webhook secret: each deployment has its own. fly uses
+          # DISTILLERY_WEBHOOK_SECRET; gcp uses DISTILLERY_GCP_WEBHOOK_SECRET.
+          DISTILLERY_WEBHOOK_SECRET: ${{ matrix.target == 'gcp' && secrets.DISTILLERY_GCP_WEBHOOK_SECRET || secrets.DISTILLERY_WEBHOOK_SECRET }}
           TARGET_URL: ${{ matrix.url }}
           TARGET: ${{ matrix.target }}
         run: |
@@ -327,7 +331,9 @@ jobs:
       - name: Trigger maintenance webhook (${{ matrix.target }})
         if: ${{ matrix.enabled && matrix.url != '' }}
         env:
-          DISTILLERY_WEBHOOK_SECRET: ${{ secrets.DISTILLERY_WEBHOOK_SECRET }}
+          # Per-target webhook secret: each deployment has its own. fly uses
+          # DISTILLERY_WEBHOOK_SECRET; gcp uses DISTILLERY_GCP_WEBHOOK_SECRET.
+          DISTILLERY_WEBHOOK_SECRET: ${{ matrix.target == 'gcp' && secrets.DISTILLERY_GCP_WEBHOOK_SECRET || secrets.DISTILLERY_WEBHOOK_SECRET }}
           TARGET_URL: ${{ matrix.url }}
           TARGET: ${{ matrix.target }}
         run: |
