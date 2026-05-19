@@ -84,16 +84,25 @@ jobs:
           docker push "${REGISTRY}:${GIT_SHA}"
           docker push "${REGISTRY}:latest"
 
-          echo "image=${REGISTRY}:${GIT_SHA}" >> "$GITHUB_OUTPUT"
+          # Deploy by digest, not by the :GIT_SHA tag. github.sha is the
+          # distill_ops commit; redeploys from the same commit render a
+          # byte-identical manifest, which `gcloud run services replace`
+          # de-duplicates into a no-op — even when the distillery base image
+          # (and thus this image's content) changed. The digest tracks
+          # content, so the manifest changes exactly when the image does.
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${REGISTRY}:${GIT_SHA}")"
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::could not resolve the pushed image digest"
+            exit 1
+          fi
+          echo "Pushed: ${DIGEST}"
+          echo "image=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Substitute image reference in service manifest
         id: manifest
         run: |
           PROJECT="${{ vars.GCP_PROJECT_ID }}"
-          GIT_SHA="${{ github.sha }}"
-
-          REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/distillery/distillery"
-          IMAGE="${REGISTRY}:${GIT_SHA}"
+          IMAGE="${{ steps.build.outputs.image }}"  # digest ref from the build step
 
           # Replace the placeholder image and PROJECT_ID in service.yaml.
           # The braced form is substituted first so that if any future placeholder is
